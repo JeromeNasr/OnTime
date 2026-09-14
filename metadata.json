@@ -1,0 +1,6 @@
+{
+  "name": "North Lebanon Fleet Tracker",
+  "description": "Real-time Android-compatible GPS fleet tracking, dispatching, and customer ETA monitoring for North Lebanon.",
+  "requestFramePermissions": ["geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

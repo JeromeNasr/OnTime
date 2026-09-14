@@ -1,0 +1,51 @@
+@import "tailwindcss";
+
+/* Leaflet Dark Map Tile Custom Filter & Marker Enhancements */
+.leaflet-container {
+  font-family: inherit;
+  background-color: #090d16;
+}
+
+/* Subtly tone down bright default OSM tiles for dark-mode aesthetic */
+.leaflet-tile {
+  filter: brightness(0.82) invert(1) contrast(1.2) hue-rotate(195deg) saturate(0.65);
+}
+
+.leaflet-popup-content-wrapper {
+  background: #0f172a;
+  color: #f8fafc;
+  border-radius: 1rem;
+  border: 1px solid #334155;
+  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.5);
+}
+
+.leaflet-popup-tip {
+  background: #0f172a;
+}
+
+/* Custom Driver Marker Anchor styling */
+.custom-driver-marker,
+.custom-pickup-pin,
+.custom-dropoff-pin,
+.custom-gps-user {
+  background: transparent;
+  border: none;
+}
+
+/* Smooth rotation for car marker */
+.custom-driver-marker svg {
+  transition: transform 0.3s ease;
+}
+
+@keyframes spinSlow {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.animate-spin-slow {
+  animation: spinSlow 12s linear infinite;
+}
