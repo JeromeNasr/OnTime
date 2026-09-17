@@ -1,7 +1,7 @@
 import React, { useEffect, useRef } from 'react';
 import L from 'leaflet';
 import { Driver, Order } from '../types';
-import { NORTH_LEBANON_BOUNDS } from '../data/northLebanonData';
+import { JBEIL_BOUNDS } from '../data/jbeilData';
 
 interface MapComponentProps {
   drivers?: Driver[];
@@ -29,6 +29,7 @@ export const MapComponent: React.FC<MapComponentProps> = ({
   userPosition,
   height = '100%',
   className = '',
+  showNorthHubs = false,
   routePath,
 }) => {
   const mapContainerRef = useRef<HTMLDivElement>(null);
@@ -41,8 +42,8 @@ export const MapComponent: React.FC<MapComponentProps> = ({
     if (!mapContainerRef.current || mapInstanceRef.current) return;
 
     const map = L.map(mapContainerRef.current, {
-      center: NORTH_LEBANON_BOUNDS.center,
-      zoom: NORTH_LEBANON_BOUNDS.defaultZoom,
+      center: JBEIL_BOUNDS.center,
+      zoom: JBEIL_BOUNDS.defaultZoom,
       zoomControl: false,
       attributionControl: true,
     });
@@ -60,11 +61,34 @@ export const MapComponent: React.FC<MapComponentProps> = ({
     markersLayerRef.current = markersGroup;
     mapInstanceRef.current = map;
 
+    if (showNorthHubs) {
+      const hubs = [
+        { name: 'LAU Byblos Campus', lat: 34.1238, lng: 35.6698 },
+        { name: 'Blat Campus Crest Dorms', lat: 34.1215, lng: 35.6630 },
+        { name: 'Mastita Student Village', lat: 34.1165, lng: 35.6558 },
+        { name: 'Jbeil Voie 13 / Highway', lat: 34.1265, lng: 35.6520 },
+        { name: 'Jbeil Old Souk & Port', lat: 34.1215, lng: 35.6455 },
+      ];
+
+      hubs.forEach((hub) => {
+        L.circleMarker([hub.lat, hub.lng], {
+          radius: 5,
+          fillColor: '#3b82f6',
+          color: '#ffffff',
+          weight: 1.5,
+          opacity: 1,
+          fillOpacity: 0.8,
+        })
+          .bindTooltip(hub.name)
+          .addTo(map);
+      });
+    }
+
     return () => {
       map.remove();
       mapInstanceRef.current = null;
     };
-  }, []);
+  }, [showNorthHubs]);
 
   // Update Markers & Polylines when data changes
   useEffect(() => {
@@ -83,11 +107,21 @@ export const MapComponent: React.FC<MapComponentProps> = ({
     if (routePath && routePath.length > 1) {
       routeLayerRef.current = L.polyline(routePath, {
         color: '#3b82f6',
-        weight: 5,
-        opacity: 0.85,
+        weight: 4,
+        opacity: 0.9,
         lineCap: 'round',
-        dashArray: '1, 8',
+        lineJoin: 'round',
       }).addTo(map);
+
+      // Auto fit bounds to route on initial load if requested
+      try {
+        const bounds = L.latLngBounds(routePath.map((p) => [p[0], p[1]]));
+        if (bounds.isValid() && !followDriver) {
+          map.fitBounds(bounds, { padding: [40, 40], maxZoom: 15 });
+        }
+      } catch (e) {
+        // ignore bounds fit error
+      }
     } else if (activeOrder && activeOrder.pickupCoords && activeOrder.dropoffCoords) {
       // Direct route line between pickup and dropoff
       const waypoints: [number, number][] = [
@@ -102,51 +136,30 @@ export const MapComponent: React.FC<MapComponentProps> = ({
       waypoints.push([activeOrder.dropoffCoords.lat, activeOrder.dropoffCoords.lng]);
 
       routeLayerRef.current = L.polyline(waypoints, {
-        color: '#10b981',
-        weight: 4,
+        color: '#3b82f6',
+        weight: 3,
         opacity: 0.8,
-        dashArray: '6, 6',
+        dashArray: '4, 4',
       }).addTo(map);
     }
 
     // 2. Render Drivers
     drivers.forEach((driver) => {
       const isSelected = driver.id === selectedDriverId;
-      const isBusy = driver.status === 'busy';
       const speedDisplay = Math.round(driver.currentLocation.speed);
 
-      // Create rich custom HTML marker
+      // Small clean arrow/direction indicator in blue (#3b82f6)
       const markerHtml = `
-        <div class="relative flex flex-col items-center group cursor-pointer select-none">
-          <!-- Speed bubble -->
-          <div class="px-1.5 py-0.5 mb-1 text-[10px] font-bold rounded-full shadow-md text-white whitespace-nowrap transition-transform ${
-            isSelected
-              ? 'bg-amber-500 ring-2 ring-white scale-110'
-              : isBusy
-              ? 'bg-emerald-600'
-              : 'bg-blue-600'
-          }">
-            ${speedDisplay > 0 ? `${speedDisplay} km/h` : 'Stopped'}
-          </div>
-
-          <!-- Car Icon with Bearing Rotation -->
-          <div class="w-10 h-10 rounded-full flex items-center justify-center shadow-xl border-2 transition-all ${
-            isSelected
-              ? 'bg-amber-500 border-white ring-4 ring-amber-400/40 scale-110'
-              : isBusy
-              ? 'bg-emerald-500 border-emerald-900'
-              : 'bg-blue-600 border-blue-900'
-          }" style="transform: rotate(${driver.currentLocation.heading || 0}deg);">
-            <svg class="w-5 h-5 text-white" viewBox="0 0 24 24" fill="currentColor">
-              <path d="M18.92 6.01C18.72 5.42 18.16 5 17.5 5h-11c-.66 0-1.21.42-1.42 1.01L3 12v8c0 .55.45 1 1 1h1c.55 0 1-.45 1-1v-1h12v1c0 .55.45 1 1 1h1c.55 0 1-.45 1-1v-8l-2.08-5.99zM6.85 7h10.29l1.04 3H5.81l1.04-3zM19 17H5v-4.66l.12-.34h13.77l.11.34V17z"/>
-              <circle cx="7.5" cy="14.5" r="1.5"/>
-              <circle cx="16.5" cy="14.5" r="1.5"/>
+        <div class="relative flex flex-col items-center cursor-pointer select-none">
+          <div class="w-7 h-7 rounded-full bg-[#3b82f6] border ${
+            isSelected ? 'border-white ring-2 ring-[#3b82f6]' : 'border-white/90'
+          } shadow flex items-center justify-center transition-transform" style="transform: rotate(${driver.currentLocation.heading || 0}deg);">
+            <svg class="w-3.5 h-3.5 text-white" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M12 2L4.5 20.29l.71.71L12 18l6.79 3 .71-.71z"/>
             </svg>
           </div>
-
-          <!-- Driver Name Tag -->
-          <div class="mt-1 px-2 py-0.5 bg-slate-900/90 backdrop-blur-sm text-slate-200 text-[10px] font-semibold rounded border border-slate-700 shadow max-w-[120px] truncate">
-            ${driver.name.split(' ')[0]} ${driver.isLeadDriver ? '⭐' : ''}
+          <div class="mt-1 px-1.5 py-0.5 bg-[#13131a] text-white text-[10px] font-medium rounded border border-white/[0.08] shadow whitespace-nowrap">
+            ${driver.name.split(' ')[0]} ${speedDisplay > 0 ? `• ${speedDisplay} km/h` : ''}
           </div>
         </div>
       `;
@@ -154,8 +167,8 @@ export const MapComponent: React.FC<MapComponentProps> = ({
       const customIcon = L.divIcon({
         html: markerHtml,
         className: 'custom-driver-marker',
-        iconSize: [80, 75],
-        iconAnchor: [40, 45],
+        iconSize: [60, 50],
+        iconAnchor: [30, 20],
       });
 
       const marker = L.marker([driver.currentLocation.lat, driver.currentLocation.lng], {
@@ -167,71 +180,63 @@ export const MapComponent: React.FC<MapComponentProps> = ({
       });
 
       marker.bindPopup(`
-        <div class="p-2 text-slate-900 font-sans">
-          <div class="flex items-center gap-1.5 font-bold text-sm">
+        <div class="text-[#94a3b8] text-xs">
+          <div class="flex items-center gap-1.5 font-bold text-white text-sm">
             <span>${driver.name}</span>
-            ${driver.isLeadDriver ? '<span class="text-xs bg-amber-100 text-amber-800 px-1 rounded">Lead</span>' : ''}
+            ${driver.isLeadDriver ? '<span class="text-[10px] bg-white/10 text-white px-1 rounded">Lead</span>' : ''}
           </div>
-          <div class="text-xs text-slate-600 mt-1">${driver.vehicleModel} • <span class="font-mono">${driver.plateNumber}</span></div>
-          <div class="text-xs text-slate-700 font-semibold mt-1">Speed: ${Math.round(driver.currentLocation.speed)} km/h • Status: ${driver.status.toUpperCase()}</div>
-          <div class="text-[11px] text-slate-500 mt-0.5">Phone: ${driver.phone}</div>
+          <div class="mt-1 text-slate-400">${driver.vehicleModel} • <span class="font-mono text-white">${driver.plateNumber}</span></div>
+          <div class="mt-1 font-medium text-slate-300">Speed: ${Math.round(driver.currentLocation.speed)} km/h • Status: ${driver.status}</div>
+          <div class="mt-0.5 text-slate-500">Phone: ${driver.phone}</div>
         </div>
       `);
     });
 
     // 3. Render Orders (Pickup & Dropoff)
     orders.forEach((order) => {
-      // Pickup Pin
+      // Pickup Pin: small clean green dot
       const pickupHtml = `
-        <div class="flex flex-col items-center">
-          <div class="w-7 h-7 bg-emerald-600 text-white rounded-full flex items-center justify-center text-xs font-black shadow-lg border-2 border-white ring-2 ring-emerald-400/50">
-            P
-          </div>
-          <div class="px-1.5 py-0.5 bg-slate-900/80 text-[9px] text-emerald-300 font-bold rounded mt-0.5 shadow whitespace-nowrap">
-            Pickup
-          </div>
+        <div class="flex flex-col items-center select-none">
+          <div class="w-3.5 h-3.5 rounded-full bg-[#22c55e] border-2 border-white shadow"></div>
+          <span class="mt-0.5 px-1 py-0.2 bg-[#13131a] text-[9px] text-[#22c55e] font-medium rounded border border-white/[0.08] whitespace-nowrap">Pickup</span>
         </div>
       `;
       const pickupIcon = L.divIcon({
         html: pickupHtml,
         className: 'custom-pickup-pin',
-        iconSize: [50, 45],
-        iconAnchor: [25, 25],
+        iconSize: [40, 30],
+        iconAnchor: [20, 7],
       });
       L.marker([order.pickupCoords.lat, order.pickupCoords.lng], { icon: pickupIcon })
         .addTo(layer)
         .bindPopup(`
-          <div class="p-2 text-slate-900">
-            <div class="text-xs font-bold text-emerald-800">PICKUP LOCATION</div>
-            <div class="text-sm font-semibold">${order.pickupAddress}</div>
-            <div class="text-xs text-slate-600 mt-1">Customer: ${order.customerName} (${order.customerPhone})</div>
+          <div class="text-[#94a3b8] text-xs">
+            <div class="text-[10px] font-semibold text-[#22c55e] uppercase">Pickup</div>
+            <div class="text-sm font-medium text-white mt-0.5">${order.pickupAddress}</div>
+            <div class="text-slate-400 mt-1">Customer: ${order.customerName} (${order.customerPhone})</div>
           </div>
         `);
 
-      // Dropoff Pin
+      // Dropoff Pin: small clean red dot
       const dropoffHtml = `
-        <div class="flex flex-col items-center">
-          <div class="w-7 h-7 bg-rose-600 text-white rounded-full flex items-center justify-center text-xs font-black shadow-lg border-2 border-white ring-2 ring-rose-400/50">
-            D
-          </div>
-          <div class="px-1.5 py-0.5 bg-slate-900/80 text-[9px] text-rose-300 font-bold rounded mt-0.5 shadow whitespace-nowrap">
-            Dropoff
-          </div>
+        <div class="flex flex-col items-center select-none">
+          <div class="w-3.5 h-3.5 rounded-full bg-[#ef4444] border-2 border-white shadow"></div>
+          <span class="mt-0.5 px-1 py-0.2 bg-[#13131a] text-[9px] text-[#ef4444] font-medium rounded border border-white/[0.08] whitespace-nowrap">Dropoff</span>
         </div>
       `;
       const dropoffIcon = L.divIcon({
         html: dropoffHtml,
         className: 'custom-dropoff-pin',
-        iconSize: [50, 45],
-        iconAnchor: [25, 25],
+        iconSize: [40, 30],
+        iconAnchor: [20, 7],
       });
       L.marker([order.dropoffCoords.lat, order.dropoffCoords.lng], { icon: dropoffIcon })
         .addTo(layer)
         .bindPopup(`
-          <div class="p-2 text-slate-900">
-            <div class="text-xs font-bold text-rose-800">DESTINATION (DROPOFF)</div>
-            <div class="text-sm font-semibold">${order.dropoffAddress}</div>
-            <div class="text-xs text-slate-600 mt-1">Package: ${order.packageInfo}</div>
+          <div class="text-[#94a3b8] text-xs">
+            <div class="text-[10px] font-semibold text-[#ef4444] uppercase">Destination</div>
+            <div class="text-sm font-medium text-white mt-0.5">${order.dropoffAddress}</div>
+            <div class="text-slate-400 mt-1">Package: ${order.packageInfo}</div>
           </div>
         `);
     });
@@ -239,18 +244,15 @@ export const MapComponent: React.FC<MapComponentProps> = ({
     // 4. Render User Phone position marker if watching real GPS
     if (userPosition) {
       const userHtml = `
-        <div class="relative flex items-center justify-center">
-          <div class="absolute w-8 h-8 rounded-full bg-cyan-500/30 animate-ping"></div>
-          <div class="w-6 h-6 rounded-full bg-cyan-500 border-2 border-white shadow-xl flex items-center justify-center text-[10px] text-slate-950 font-bold">
-            GPS
-          </div>
+        <div class="flex items-center justify-center">
+          <div class="w-3.5 h-3.5 rounded-full bg-[#3b82f6] border-2 border-white shadow"></div>
         </div>
       `;
       const userIcon = L.divIcon({
         html: userHtml,
         className: 'custom-gps-user',
-        iconSize: [32, 32],
-        iconAnchor: [16, 16],
+        iconSize: [20, 20],
+        iconAnchor: [10, 10],
       });
       L.marker([userPosition.lat, userPosition.lng], { icon: userIcon }).addTo(layer);
     }
@@ -271,14 +273,13 @@ export const MapComponent: React.FC<MapComponentProps> = ({
 
   return (
     <div className={`relative w-full overflow-hidden ${className}`} style={{ height }}>
-      <div id="north-lebanon-map-view" ref={mapContainerRef} className="w-full h-full z-0" />
+      <div id="jbeil-fleet-map-view" ref={mapContainerRef} className="w-full h-full z-0" />
       
-      {/* North Lebanon Geographic Watermark / Badge */}
+      {/* Subtle indicator */}
       <div className="absolute top-3 left-3 z-[400] pointer-events-none">
-        <div className="bg-slate-900/90 backdrop-blur-md px-3 py-1.5 rounded-lg border border-slate-700/80 shadow-lg flex items-center gap-2">
-          <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse"></span>
-          <span className="text-xs font-semibold text-slate-200">North Lebanon OpenStreetMap</span>
-          <span className="text-[10px] bg-slate-800 text-slate-400 px-1.5 py-0.5 rounded font-mono">Tripoli • Batroun</span>
+        <div className="bg-[#13131a]/85 backdrop-blur-xs px-2.5 py-1 rounded-md text-[11px] text-[#94a3b8] border border-white/[0.06] flex items-center gap-1.5 shadow-sm">
+          <span className="w-1.5 h-1.5 rounded-full bg-[#22c55e]"></span>
+          <span>Jbeil (Byblos) Grid</span>
         </div>
       </div>
     </div>

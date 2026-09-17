@@ -1,29 +1,66 @@
 @import "tailwindcss";
 
-/* Leaflet Dark Map Tile Custom Filter & Marker Enhancements */
-.leaflet-container {
-  font-family: inherit;
-  background-color: #090d16;
+@layer base {
+  body {
+    background-color: #0a0a0f;
+    color: #94a3b8;
+    font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .font-mono {
+    font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  }
 }
 
-/* Subtly tone down bright default OSM tiles for dark-mode aesthetic */
+/* Leaflet Dark Map Tile Custom Filter & Minimal Markers */
+.leaflet-container {
+  font-family: inherit;
+  background-color: #0a0a0f !important;
+}
+
+/* Tone down OSM tiles for minimal dark mode */
 .leaflet-tile {
-  filter: brightness(0.82) invert(1) contrast(1.2) hue-rotate(195deg) saturate(0.65);
+  filter: brightness(0.7) invert(1) contrast(1.15) hue-rotate(200deg) saturate(0.4);
 }
 
 .leaflet-popup-content-wrapper {
-  background: #0f172a;
-  color: #f8fafc;
-  border-radius: 1rem;
-  border: 1px solid #334155;
-  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.5);
+  background: #13131a !important;
+  color: #f8fafc !important;
+  border-radius: 8px !important;
+  border: 1px solid rgba(255, 255, 255, 0.08) !important;
+  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.6) !important;
+  padding: 0 !important;
+}
+
+.leaflet-popup-content {
+  margin: 10px 14px !important;
+  line-height: 1.4 !important;
 }
 
 .leaflet-popup-tip {
-  background: #0f172a;
+  background: #13131a !important;
 }
 
-/* Custom Driver Marker Anchor styling */
+.leaflet-bar {
+  border: 1px solid rgba(255, 255, 255, 0.08) !important;
+  border-radius: 8px !important;
+  overflow: hidden;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4) !important;
+}
+
+.leaflet-bar a {
+  background-color: #13131a !important;
+  color: #94a3b8 !important;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06) !important;
+}
+
+.leaflet-bar a:hover {
+  background-color: #1a1a24 !important;
+  color: #ffffff !important;
+}
+
+/* Marker anchors */
 .custom-driver-marker,
 .custom-pickup-pin,
 .custom-dropoff-pin,
@@ -32,20 +69,3 @@
   border: none;
 }
 
-/* Smooth rotation for car marker */
-.custom-driver-marker svg {
-  transition: transform 0.3s ease;
-}
-
-@keyframes spinSlow {
-  from {
-    transform: rotate(0deg);
-  }
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-.animate-spin-slow {
-  animation: spinSlow 12s linear infinite;
-}

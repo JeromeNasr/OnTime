@@ -1,382 +1,414 @@
-import React, { useState } from 'react';
-import {
-  Search,
-  Clock,
-  Navigation,
-  Phone,
-  Shield,
-  Gauge,
-  CheckCircle2,
-  Package,
-  MapPin,
-  AlertTriangle,
-} from 'lucide-react';
-import { Driver, Order } from '../types';
+import React, { useState, useEffect } from 'react';
+import { Search, MapPin, Car, AlertCircle, CheckCircle2, XCircle, Clock } from 'lucide-react';
+import { Driver, Order, PublicTrackingResponse } from '../types';
 import { MapComponent } from './MapComponent';
+import { api } from '../services/api';
+import { joinOrderRoom, getSocket } from '../services/socket';
 
 interface CustomerTrackingViewProps {
-  orders: Order[];
-  drivers: Driver[];
+  orders?: Order[];
+  drivers?: Driver[];
   initialTrackingCode?: string;
   onSelectOrder?: (order: Order) => void;
 }
 
 export const CustomerTrackingView: React.FC<CustomerTrackingViewProps> = ({
-  orders,
-  drivers,
   initialTrackingCode,
 }) => {
-  const [searchQuery, setSearchQuery] = useState(initialTrackingCode || '');
-  const [selectedOrder, setSelectedOrder] = useState<Order | null>(() => {
-    if (initialTrackingCode) {
-      return (
-        orders.find(
-          (o) =>
-            o.trackingCode.toLowerCase() === initialTrackingCode.toLowerCase() ||
-            o.id.toLowerCase() === initialTrackingCode.toLowerCase()
-        ) || orders[0] || null
-      );
-    }
-    return orders[0] || null;
-  });
+  const [searchQuery, setSearchQuery] = useState(initialTrackingCode || 'TRK-8821');
+  const [trackingData, setTrackingData] = useState<PublicTrackingResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [secondsAgo, setSecondsAgo] = useState<number>(0);
 
-  // Find assigned driver for currently selected order
-  const assignedDriver = selectedOrder?.assignedDriverId
-    ? drivers.find((d) => d.id === selectedOrder.assignedDriverId)
-    : null;
-
-  // Calculate live ETA and distance
-  let distanceKm = 4.8;
-  let etaMinutes = 12;
-  const currentSpeed = assignedDriver ? Math.round(assignedDriver.currentLocation.speed) : 0;
-
-  if (selectedOrder && assignedDriver) {
-    distanceKm = haversineDistanceKm(
-      assignedDriver.currentLocation.lat,
-      assignedDriver.currentLocation.lng,
-      selectedOrder.dropoffCoords.lat,
-      selectedOrder.dropoffCoords.lng
-    );
-
-    // Speedometer-based ETA calculation
-    const effectiveSpeed = currentSpeed > 10 ? currentSpeed : 32; // fallback if stopped at red light
-    const trafficMultiplier = 1.2; // North Lebanon urban / coastal traffic factor
-    const hours = distanceKm / effectiveSpeed;
-    etaMinutes = Math.max(2, Math.round(hours * 60 * trafficMultiplier));
-  }
-
-  function haversineDistanceKm(lat1: number, lon1: number, lat2: number, lon2: number) {
-    const R = 6371;
-    const dLat = ((lat2 - lat1) * Math.PI) / 180;
-    const dLon = ((lon2 - lon1) * Math.PI) / 180;
-    const a =
-      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-      Math.cos((lat1 * Math.PI) / 180) *
-        Math.cos((lat2 * Math.PI) / 180) *
-        Math.sin(dLon / 2) *
-        Math.sin(dLon / 2);
-    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  }
-
-  const handleSearch = (e: React.FormEvent) => {
-    e.preventDefault();
-    const query = searchQuery.trim().toLowerCase();
-    const found = orders.find(
-      (o) =>
-        o.trackingCode.toLowerCase() === query ||
-        o.id.toLowerCase() === query ||
-        o.customerPhone.includes(query)
-    );
-    if (found) {
-      setSelectedOrder(found);
+  const fetchTracking = async (code: string) => {
+    if (!code.trim()) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await api.trackOrder(code.trim());
+      setTrackingData(data);
+      setSecondsAgo(data.lastUpdatedSecondsAgo || 0);
+      joinOrderRoom(data.order.id);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Unable to find active trip with this tracking link.';
+      setError(msg);
+      setTrackingData(null);
+    } finally {
+      setLoading(false);
     }
   };
 
+  useEffect(() => {
+    fetchTracking(searchQuery);
+  }, []);
+
+  // Timer to increment "seconds ago" smoothly on client
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setSecondsAgo((prev) => prev + 1);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  // Socket.io real-time updates for student tracking
+  useEffect(() => {
+    const socket = getSocket();
+
+    const handleEtaUpdate = (payload: {
+      orderId: string;
+      driverLocation?: Driver['currentLocation'];
+      etaMinutes: number;
+      roadDistanceKm: number;
+      polyline: [number, number][];
+      trafficLevel: 'Normal' | 'Moderate' | 'Heavy';
+      trafficSource: string;
+    }) => {
+      setTrackingData((prev) => {
+        if (!prev || prev.order.id !== payload.orderId) return prev;
+        setSecondsAgo(0);
+        return {
+          ...prev,
+          liveEtaMinutes: payload.etaMinutes,
+          distanceKm: payload.roadDistanceKm,
+          roadRoute: payload.polyline && payload.polyline.length > 0 ? payload.polyline : prev.roadRoute,
+          trafficCondition: payload.trafficLevel,
+          driver: prev.driver && payload.driverLocation
+            ? {
+                ...prev.driver,
+                currentLocation: payload.driverLocation,
+              }
+            : prev.driver,
+        };
+      });
+    };
+
+    const handleStatusChanged = (payload: { orderId: string; status: Order['status'] }) => {
+      setTrackingData((prev) => {
+        if (!prev || prev.order.id !== payload.orderId) return prev;
+        const isFinished = payload.status === 'DELIVERED' || payload.status === 'CANCELLED';
+        setSecondsAgo(0);
+        return {
+          ...prev,
+          order: { ...prev.order, status: payload.status },
+          driver: prev.driver
+            ? {
+                ...prev.driver,
+                // Stop exposing live coordinates once trip finishes
+                currentLocation: isFinished ? undefined : prev.driver.currentLocation,
+              }
+            : null,
+          roadRoute: isFinished ? [] : prev.roadRoute,
+        };
+      });
+    };
+
+    socket.on('order:eta_update', handleEtaUpdate);
+    socket.on('order:status_changed', handleStatusChanged);
+
+    return () => {
+      socket.off('order:eta_update', handleEtaUpdate);
+      socket.off('order:status_changed', handleStatusChanged);
+    };
+  }, []);
+
+  const handleSearchSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    fetchTracking(searchQuery);
+  };
+
+  // Human-friendly student status labels
+  const orderStatus = trackingData?.order.status.toUpperCase() || '';
+  const isCompleted = orderStatus === 'DELIVERED';
+  const isCancelled = orderStatus === 'CANCELLED';
+  const isAtPickup = orderStatus === 'ARRIVED_PICKUP';
+  const isInTransit = orderStatus === 'IN_TRANSIT' || orderStatus === 'PICKED_UP';
+  const isEnRoute = orderStatus === 'DRIVER_EN_ROUTE_PICKUP' || orderStatus === 'EN_ROUTE_PICKUP';
+  const isAssigned = orderStatus === 'ASSIGNED';
+  const isPending = orderStatus === 'CREATED';
+
+  let statusTitle = 'Waiting for driver';
+  let statusBadgeClass = 'bg-white/10 text-slate-300';
+  if (isCompleted) {
+    statusTitle = 'Trip completed';
+    statusBadgeClass = 'bg-[#22c55e]/15 text-[#22c55e] border border-[#22c55e]/30';
+  } else if (isCancelled) {
+    statusTitle = 'Trip cancelled';
+    statusBadgeClass = 'bg-[#ef4444]/15 text-[#ef4444] border border-[#ef4444]/30';
+  } else if (isAtPickup) {
+    statusTitle = 'Driver is at pickup';
+    statusBadgeClass = 'bg-[#22c55e]/15 text-[#22c55e] border border-[#22c55e]/30 animate-pulse';
+  } else if (isInTransit) {
+    statusTitle = 'Trip in progress';
+    statusBadgeClass = 'bg-[#3b82f6]/15 text-[#3b82f6] border border-[#3b82f6]/30';
+  } else if (isEnRoute) {
+    statusTitle = 'Driver is on the way';
+    statusBadgeClass = 'bg-[#3b82f6]/15 text-[#3b82f6] border border-[#3b82f6]/30';
+  } else if (isAssigned) {
+    statusTitle = 'Taxi Assigned';
+    statusBadgeClass = 'bg-amber-500/15 text-amber-400 border border-amber-500/30';
+  }
+
+  // Check staleness of telemetry (> 35 seconds without ping)
+  const isStale = secondsAgo > 35 && !isCompleted && !isCancelled && Boolean(trackingData?.driver?.currentLocation);
+
+  // Driver entity for map if live tracking is active
+  const driverForMap: Driver[] =
+    trackingData?.driver && trackingData.driver.currentLocation && !isCompleted && !isCancelled
+      ? [
+          {
+            id: 'tracked-taxi',
+            companyId: '',
+            name: trackingData.driver.name,
+            phone: '', // Redacted
+            vehicleId: '',
+            vehicleModel: trackingData.driver.vehicleModel,
+            plateNumber: trackingData.driver.plateNumber,
+            networkCode: '',
+            isLeadDriver: false,
+            status: isAtPickup ? 'ARRIVED_PICKUP' : isInTransit ? 'EN_ROUTE_DELIVERY' : 'EN_ROUTE_PICKUP',
+            currentLocation: {
+              ...trackingData.driver.currentLocation,
+              timestamp: Date.now() - secondsAgo * 1000,
+            },
+            totalTrips: 0,
+            rating: trackingData.driver.rating || 5.0,
+          },
+        ]
+      : [];
+
   return (
-    <div className="w-full flex flex-col gap-4 pb-12">
-      {/* Tracking Search Header */}
-      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 shadow-xl">
-        <form onSubmit={handleSearch} className="flex flex-col sm:flex-row gap-2">
-          <div className="relative flex-1">
-            <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Enter Delivery PIN (e.g. TRK-9812 or ORD-TRIP-101)"
-              className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-10 pr-4 py-2.5 text-xs text-slate-100 placeholder-slate-500 outline-none focus:border-emerald-500"
-            />
-          </div>
+    <div className="w-full max-w-xl mx-auto flex flex-col items-center px-4 py-4 pb-20">
+      {/* Quick Lookup Bar & Dorm Shuttles */}
+      <div className="w-full mb-5">
+        <form onSubmit={handleSearchSubmit} className="w-full relative flex items-center mb-2.5">
+          <input
+            id="input-student-tracking-search"
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Paste tracking token or code (e.g. TRK-8821)"
+            className="w-full h-11 bg-[#13131a] border border-white/[0.08] focus:border-[#3b82f6] rounded-xl pl-4 pr-24 text-xs text-white placeholder-[#4a5568] font-mono outline-none transition-colors"
+          />
           <button
-            id="btn-customer-track-search"
             type="submit"
-            className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl shadow-lg shadow-emerald-600/20 flex items-center justify-center gap-1.5 transition-all"
+            id="btn-student-track-submit"
+            disabled={loading}
+            className="absolute right-1.5 h-8 px-3.5 bg-[#3b82f6] hover:bg-blue-600 disabled:opacity-50 text-white text-xs font-medium rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer"
           >
-            Track Delivery
+            <Search className="w-3.5 h-3.5" />
+            <span>{loading ? 'Finding...' : 'Track'}</span>
           </button>
         </form>
 
-        {/* Quick Demo Track Buttons */}
-        <div className="flex items-center gap-2 mt-3 overflow-x-auto text-[11px] text-slate-400 pb-1">
-          <span className="shrink-0 text-[10px] uppercase font-semibold text-slate-500">
-            Quick Orders:
-          </span>
-          {orders.slice(0, 3).map((o) => (
-            <button
-              key={o.id}
-              onClick={() => {
-                setSelectedOrder(o);
-                setSearchQuery(o.trackingCode);
-              }}
-              className={`px-2.5 py-1 rounded-lg border shrink-0 transition-all font-mono ${
-                selectedOrder?.id === o.id
-                  ? 'bg-emerald-950/60 border-emerald-600/60 text-emerald-300 font-bold'
-                  : 'bg-slate-950 border-slate-850 hover:border-slate-700 text-slate-300'
-              }`}
-            >
-              {o.trackingCode} ({o.customerName.split(' ')[0]})
-            </button>
-          ))}
+        {/* Jbeil Student Dorm Quick Corridor Chips */}
+        <div className="flex items-center gap-1.5 overflow-x-auto pb-1 text-[11px] text-[#94a3b8]">
+          <span className="shrink-0 text-[#4a5568] text-[10px] uppercase font-semibold">Active:</span>
+          <button
+            type="button"
+            onClick={() => {
+              setSearchQuery('TRK-8821');
+              fetchTracking('TRK-8821');
+            }}
+            className={`shrink-0 px-2 py-1 rounded-md border font-mono transition-colors cursor-pointer ${
+              searchQuery === 'TRK-8821'
+                ? 'bg-[#3b82f6]/15 text-[#3b82f6] border-[#3b82f6]/30'
+                : 'bg-[#13131a] text-[#94a3b8] border-white/[0.06] hover:text-white'
+            }`}
+          >
+            TRK-8821 (Campus Crest)
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setSearchQuery('TRK-4419');
+              fetchTracking('TRK-4419');
+            }}
+            className={`shrink-0 px-2 py-1 rounded-md border font-mono transition-colors cursor-pointer ${
+              searchQuery === 'TRK-4419'
+                ? 'bg-[#3b82f6]/15 text-[#3b82f6] border-[#3b82f6]/30'
+                : 'bg-[#13131a] text-[#94a3b8] border-white/[0.06] hover:text-white'
+            }`}
+          >
+            TRK-4419 (Green House)
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setSearchQuery('TRK-1920');
+              fetchTracking('TRK-1920');
+            }}
+            className={`shrink-0 px-2 py-1 rounded-md border font-mono transition-colors cursor-pointer ${
+              searchQuery === 'TRK-1920'
+                ? 'bg-[#3b82f6]/15 text-[#3b82f6] border-[#3b82f6]/30'
+                : 'bg-[#13131a] text-[#94a3b8] border-white/[0.06] hover:text-white'
+            }`}
+          >
+            TRK-1920 (Mastita)
+          </button>
         </div>
       </div>
 
-      {selectedOrder ? (
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-          {/* Main Live OpenStreetMap Container */}
-          <div className="lg:col-span-2 flex flex-col gap-3">
-            <div className="h-[420px] rounded-2xl overflow-hidden border border-slate-800 shadow-2xl relative">
-              <MapComponent
-                drivers={assignedDriver ? [assignedDriver] : drivers}
-                selectedDriverId={assignedDriver?.id}
-                orders={[selectedOrder]}
-                activeOrder={selectedOrder}
-                height="100%"
-                followDriver={true}
-              />
+      {error && (
+        <div className="w-full mb-4 p-3 rounded-xl bg-[#ef4444]/10 border border-[#ef4444]/20 text-[#ef4444] text-xs flex items-center gap-2">
+          <AlertCircle className="w-4 h-4 shrink-0" />
+          <span>{error}</span>
+        </div>
+      )}
 
-              {/* Floating Live Telemetry Badge over Map */}
-              {assignedDriver && (
-                <div className="absolute bottom-4 left-4 z-[400] bg-slate-950/90 backdrop-blur-md p-3 rounded-xl border border-slate-800 shadow-xl flex items-center gap-3">
-                  <div className="flex items-center gap-2">
-                    <div className="w-8 h-8 rounded-lg bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
-                      <Gauge className="w-4 h-4" />
-                    </div>
-                    <div>
-                      <div className="text-[10px] text-slate-400 uppercase font-semibold">
-                        Driver Speed
-                      </div>
-                      <div className="text-sm font-mono font-bold text-emerald-400">
-                        {currentSpeed} <span className="text-[10px] font-normal text-slate-400">km/h</span>
-                      </div>
-                    </div>
-                  </div>
+      {/* Main Student-Facing Read-Only Card */}
+      {trackingData && (
+        <div className="w-full flex flex-col bg-[#13131a] border border-white/[0.08] rounded-2xl overflow-hidden shadow-2xl">
+          {/* Header: Brand + Header State */}
+          <div className="p-5 border-b border-white/[0.06] flex items-center justify-between">
+            <div>
+              <div className="text-[11px] font-semibold text-[#3b82f6] tracking-wider uppercase">
+                ONTime
+              </div>
+              <h1 className="text-lg font-bold text-white tracking-tight mt-0.5">
+                Your Taxi
+              </h1>
+            </div>
 
-                  <div className="border-l border-slate-800 pl-3">
-                    <div className="text-[10px] text-slate-400 uppercase font-semibold">
-                      Distance to You
-                    </div>
-                    <div className="text-sm font-mono font-bold text-slate-100">
-                      {distanceKm.toFixed(1)} <span className="text-[10px] font-normal text-slate-400">km</span>
-                    </div>
-                  </div>
+            <div className={`px-2.5 py-1 rounded-full text-xs font-medium ${statusBadgeClass}`}>
+              {statusTitle}
+            </div>
+          </div>
+
+          {/* Key Metrics: Driver & ETA */}
+          <div className="p-5 grid grid-cols-2 gap-4 bg-[#0a0a0f]/60 border-b border-white/[0.06]">
+            {/* Driver & Vehicle */}
+            <div>
+              <div className="text-[11px] text-[#4a5568] uppercase font-medium">Taxi & Driver</div>
+              <div className="text-sm font-semibold text-white mt-0.5 truncate">
+                {trackingData.driver ? trackingData.driver.name : 'Dispatching...'}
+              </div>
+              {trackingData.driver && (
+                <div className="text-[11px] text-[#94a3b8] mt-0.5 font-mono">
+                  {trackingData.driver.vehicleModel} • {trackingData.driver.plateNumber}
                 </div>
               )}
             </div>
 
-            {/* ETA and Traffic Analysis Banner */}
-            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 flex flex-col sm:flex-row items-center justify-between gap-4 shadow-xl">
-              <div className="flex items-center gap-3">
-                <div className="w-12 h-12 rounded-2xl bg-blue-500/20 border border-blue-500/30 flex items-center justify-center text-blue-400 shrink-0">
-                  <Clock className="w-6 h-6 animate-spin-slow" />
-                </div>
-                <div>
-                  <div className="text-xs font-semibold text-slate-400 uppercase tracking-wide">
-                    Estimated Time of Arrival
-                  </div>
-                  <div className="flex items-baseline gap-2">
-                    <span className="text-2xl font-black font-mono text-emerald-400">
-                      ~{etaMinutes} Minutes
-                    </span>
-                    <span className="text-xs text-slate-400">
-                      ({distanceKm.toFixed(1)} km away)
-                    </span>
-                  </div>
-                </div>
+            {/* Big ETA */}
+            <div className="text-right">
+              <div className="text-[11px] text-[#4a5568] uppercase font-medium">ETA</div>
+              <div className="text-2xl font-bold text-white mt-0.5 tabular-nums">
+                {isCompleted ? (
+                  <span className="text-[#22c55e] text-lg font-medium">Arrived</span>
+                ) : isCancelled ? (
+                  <span className="text-[#ef4444] text-lg font-medium">Cancelled</span>
+                ) : isAtPickup ? (
+                  <span className="text-[#22c55e] text-lg font-medium">At Pickup</span>
+                ) : trackingData.liveEtaMinutes ? (
+                  `~ ${trackingData.liveEtaMinutes} min`
+                ) : (
+                  'Calculating'
+                )}
               </div>
-
-              {/* Traffic & Speed Calculation Breakdown */}
-              <div className="bg-slate-950 p-2.5 rounded-xl border border-slate-850 text-xs text-slate-400 flex items-center gap-3">
-                <div>
-                  <span className="text-[10px] block text-slate-500 uppercase">Traffic Model:</span>
-                  <span className="text-slate-200 font-semibold">North Coast Flow (Normal)</span>
+              {!isCompleted && !isCancelled && trackingData.distanceKm && (
+                <div className="text-[11px] text-[#94a3b8] mt-0.5 tabular-nums">
+                  {trackingData.distanceKm.toFixed(1)} km away
                 </div>
-                <div className="border-l border-slate-800 pl-3">
-                  <span className="text-[10px] block text-slate-500 uppercase">Speed Sensor:</span>
-                  <span className="text-emerald-400 font-semibold font-mono">{currentSpeed} km/h GPS</span>
-                </div>
-              </div>
+              )}
             </div>
           </div>
 
-          {/* Delivery & Driver Details Card */}
-          <div className="flex flex-col gap-4">
-            {/* Driver Profile Card */}
-            {assignedDriver ? (
-              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 shadow-xl">
-                <div className="flex items-center justify-between mb-3">
-                  <span className="text-xs font-bold uppercase tracking-wider text-slate-400">
-                    Your Assigned Driver
-                  </span>
-                  <span className="bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[10px] font-bold px-2 py-0.5 rounded-full">
-                    EN ROUTE
-                  </span>
-                </div>
-
-                <div className="flex items-center gap-3 mb-4">
-                  <div className="w-12 h-12 rounded-full bg-gradient-to-tr from-blue-600 to-indigo-600 flex items-center justify-center text-white font-bold text-lg shadow-lg">
-                    {assignedDriver.name.charAt(0)}
-                  </div>
-                  <div>
-                    <h3 className="font-bold text-sm text-slate-100">{assignedDriver.name}</h3>
-                    <p className="text-xs text-slate-400">
-                      {assignedDriver.vehicleModel} •{' '}
-                      <span className="font-mono text-slate-300 font-bold">
-                        {assignedDriver.plateNumber}
-                      </span>
-                    </p>
-                    <div className="text-[11px] text-amber-400 font-semibold mt-0.5">
-                      ★ {assignedDriver.rating} Rating • {assignedDriver.totalTrips} Trips
+          {/* LIVE MAP SECTION */}
+          <div className="w-full h-[280px] sm:h-[340px] relative bg-[#0a0a0f]">
+            {isCompleted || isCancelled ? (
+              <div className="w-full h-full flex flex-col items-center justify-center p-6 text-center text-[#94a3b8]">
+                {isCompleted ? (
+                  <>
+                    <CheckCircle2 className="w-10 h-10 text-[#22c55e] mb-2" />
+                    <div className="text-sm font-semibold text-white">Trip Completed</div>
+                    <div className="text-xs text-[#94a3b8] mt-1 max-w-xs">
+                      Taxi reached destination. Live GPS tracking has ended.
                     </div>
-                  </div>
-                </div>
-
-                <a
-                  href={`tel:${assignedDriver.phone}`}
-                  className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl shadow flex items-center justify-center gap-2 transition-colors"
-                >
-                  <Phone className="w-3.5 h-3.5" /> Call Driver ({assignedDriver.phone})
-                </a>
+                  </>
+                ) : (
+                  <>
+                    <XCircle className="w-10 h-10 text-[#ef4444] mb-2" />
+                    <div className="text-sm font-semibold text-white">Trip Cancelled</div>
+                    <div className="text-xs text-[#94a3b8] mt-1 max-w-xs">
+                      This trip was cancelled by dispatch.
+                    </div>
+                  </>
+                )}
               </div>
             ) : (
-              <div className="bg-slate-900 border border-dashed border-slate-800 rounded-2xl p-5 text-center text-slate-400">
-                <AlertTriangle className="w-6 h-6 text-amber-400 mx-auto mb-2" />
-                <p className="text-xs font-semibold text-slate-200">Awaiting Driver Assignment</p>
-                <p className="text-[11px] text-slate-500 mt-1">
-                  The lead driver is currently assigning a vehicle from the North Lebanon fleet.
-                </p>
+              <MapComponent
+                drivers={driverForMap}
+                selectedDriverId={driverForMap[0]?.id}
+                orders={[trackingData.order]}
+                activeOrder={trackingData.order}
+                routePath={trackingData.roadRoute}
+                followDriver={Boolean(driverForMap.length > 0)}
+                height="100%"
+                className="w-full h-full"
+              />
+            )}
+          </div>
+
+          {/* Map Legend & Locations Summary */}
+          <div className="p-4 sm:p-5 flex flex-col gap-3 text-xs border-t border-white/[0.06]">
+            {/* Visual Legend */}
+            {!isCompleted && !isCancelled && (
+              <div className="flex items-center justify-between pb-2 border-b border-white/[0.04] text-[11px] text-[#94a3b8]">
+                <div className="flex items-center gap-1.5">
+                  <span className="w-2.5 h-2.5 rounded-full bg-[#3b82f6] inline-block" />
+                  <span>Taxi location: ●</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className="w-2.5 h-2.5 rounded-full bg-[#22c55e] inline-block" />
+                  <span>Pickup location: 📍</span>
+                </div>
               </div>
             )}
 
-            {/* Delivery Progress Steps */}
-            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 shadow-xl">
-              <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-3">
-                Order Tracking Status
-              </h4>
-
-              <div className="space-y-3">
-                <div className="flex items-center gap-3 text-xs">
-                  <div className="w-6 h-6 rounded-full bg-emerald-500 text-slate-950 flex items-center justify-center font-bold shrink-0">
-                    ✓
-                  </div>
-                  <div>
-                    <div className="font-semibold text-slate-200">Order Confirmed</div>
-                    <div className="text-[10px] text-slate-500">Order #{selectedOrder.id}</div>
-                  </div>
+            {/* Pickup & Destination */}
+            <div className="flex flex-col gap-2 pt-1">
+              <div className="flex items-start gap-2">
+                <span className="text-[#22c55e] font-bold text-xs mt-0.5">●</span>
+                <div>
+                  <div className="text-[10px] text-[#4a5568] uppercase font-medium">Pickup</div>
+                  <div className="text-slate-200">{trackingData.order.pickupAddress}</div>
                 </div>
+              </div>
 
-                <div className="flex items-center gap-3 text-xs">
-                  <div
-                    className={`w-6 h-6 rounded-full flex items-center justify-center font-bold shrink-0 ${
-                      selectedOrder.status !== 'pending'
-                        ? 'bg-emerald-500 text-slate-950'
-                        : 'bg-slate-800 text-slate-500'
-                    }`}
-                  >
-                    {selectedOrder.status !== 'pending' ? '✓' : '2'}
-                  </div>
-                  <div>
-                    <div
-                      className={`font-semibold ${
-                        selectedOrder.status !== 'pending' ? 'text-slate-200' : 'text-slate-500'
-                      }`}
-                    >
-                      Driver Assigned & Picked Up
-                    </div>
-                    <div className="text-[10px] text-slate-500 truncate max-w-[200px]">
-                      {selectedOrder.pickupAddress}
-                    </div>
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-3 text-xs">
-                  <div
-                    className={`w-6 h-6 rounded-full flex items-center justify-center font-bold shrink-0 ${
-                      selectedOrder.status === 'in_transit' || selectedOrder.status === 'delivered'
-                        ? 'bg-emerald-500 text-slate-950'
-                        : 'bg-slate-800 text-slate-500'
-                    }`}
-                  >
-                    {selectedOrder.status === 'delivered' ? '✓' : '3'}
-                  </div>
-                  <div>
-                    <div
-                      className={`font-semibold ${
-                        selectedOrder.status === 'in_transit' || selectedOrder.status === 'delivered'
-                          ? 'text-slate-200'
-                          : 'text-slate-500'
-                      }`}
-                    >
-                      In Transit (Live Speedometer GPS)
-                    </div>
-                    <div className="text-[10px] text-slate-500">
-                      Destination: {selectedOrder.dropoffAddress}
-                    </div>
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-3 text-xs">
-                  <div
-                    className={`w-6 h-6 rounded-full flex items-center justify-center font-bold shrink-0 ${
-                      selectedOrder.status === 'delivered'
-                        ? 'bg-emerald-500 text-slate-950'
-                        : 'bg-slate-800 text-slate-500'
-                    }`}
-                  >
-                    4
-                  </div>
-                  <div>
-                    <div
-                      className={`font-semibold ${
-                        selectedOrder.status === 'delivered' ? 'text-slate-200' : 'text-slate-500'
-                      }`}
-                    >
-                      Delivered
-                    </div>
-                    <div className="text-[10px] text-slate-500">Recipient signature confirmation</div>
-                  </div>
+              <div className="flex items-start gap-2">
+                <span className="text-[#ef4444] font-bold text-xs mt-0.5">📍</span>
+                <div>
+                  <div className="text-[10px] text-[#4a5568] uppercase font-medium">Destination</div>
+                  <div className="text-slate-200">{trackingData.order.dropoffAddress}</div>
                 </div>
               </div>
             </div>
 
-            {/* Destination & Package Specs */}
-            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 text-xs space-y-2">
-              <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                Delivery Details
+            {/* GPS Freshness Indicator */}
+            <div className="pt-2 border-t border-white/[0.06] flex items-center justify-between text-[11px]">
+              <div className="flex items-center gap-1.5">
+                <Clock className={`w-3.5 h-3.5 ${isStale ? 'text-amber-400' : 'text-[#94a3b8]'}`} />
+                {isStale ? (
+                  <span className="text-amber-400 font-medium">
+                    Driver location hasn't updated recently
+                  </span>
+                ) : isCompleted || isCancelled ? (
+                  <span className="text-[#4a5568]">Tracking finished</span>
+                ) : (
+                  <span className="text-[#94a3b8]">
+                    Last updated: {secondsAgo < 2 ? 'just now' : `${secondsAgo} seconds ago`}
+                  </span>
+                )}
               </div>
-              <div className="flex items-start gap-2">
-                <MapPin className="w-3.5 h-3.5 text-rose-400 shrink-0 mt-0.5" />
-                <span className="text-slate-300 font-medium">{selectedOrder.dropoffAddress}</span>
-              </div>
-              <div className="p-2 bg-slate-950 rounded-xl text-slate-400 border border-slate-850">
-                Package: <strong className="text-slate-200">{selectedOrder.packageInfo}</strong>
-              </div>
+
+              {trackingData.trafficCondition && !isCompleted && !isCancelled && (
+                <span className="text-[#4a5568]">
+                  Traffic: {trackingData.trafficCondition}
+                </span>
+              )}
             </div>
           </div>
-        </div>
-      ) : (
-        <div className="p-12 text-center bg-slate-900 border border-slate-800 rounded-2xl text-slate-400">
-          <Search className="w-8 h-8 mx-auto text-slate-600 mb-2" />
-          <p className="text-sm font-semibold">Enter a tracking PIN above to view live car location</p>
         </div>
       )}
     </div>

@@ -6,12 +6,10 @@ import {
   LayoutDashboard,
   Route,
   Building2,
-  Radio,
-  Clock,
-  Sparkles,
-  PhoneCall,
-  Menu,
   ChevronDown,
+  Wifi,
+  WifiOff,
+  UserCheck,
 } from 'lucide-react';
 import { Driver, Order, Network, TripLog } from './types';
 import { DriverPhoneView } from './components/DriverPhoneView';
@@ -21,24 +19,36 @@ import { CompanyDashboardView } from './components/CompanyDashboardView';
 import { NetworkSwitcherModal } from './components/NetworkSwitcherModal';
 import { TripHistoryModal } from './components/TripHistoryModal';
 import { MapComponent } from './components/MapComponent';
+import { getSocket, joinCompanyRoom, joinDriverRoom } from './services/socket';
+import { api } from './services/api';
 
 export default function App() {
   // Navigation tabs: Driver Phone, Lead Dispatcher, Customer Live Tracking, Fleet Dashboard
   const [activeTab, setActiveTab] = useState<'driver' | 'lead' | 'customer' | 'company'>('driver');
+  const [initialTrackingCode, setInitialTrackingCode] = useState<string>('TRK-8821');
 
   // Network & Entities State
   const [networks, setNetworks] = useState<Network[]>([]);
   const [currentNetwork, setCurrentNetwork] = useState<Network>({
-    code: 'NORTH-77',
-    name: 'Tripoli Express & North Courier',
-    ownerName: 'Tarek Haddad',
+    id: 'comp-jbeil-01',
+    code: 'JBEIL-CAMPUS',
+    name: 'Byblos Student Fleet & Shuttle',
+    ownerName: 'Charbel Abi Nader',
+    ownerEmail: 'charbel@byblosfleet.lb',
     createdAt: Date.now(),
+    settings: {
+      adaptiveGpsMovingSec: 3,
+      adaptiveGpsStoppedSec: 20,
+      speedLimitKmH: 60,
+      enablePublicDriverPhone: false,
+    },
   });
 
   const [drivers, setDrivers] = useState<Driver[]>([]);
-  const [currentDriverId, setCurrentDriverId] = useState<string>('drv-lead-1');
+  const [currentDriverId, setCurrentDriverId] = useState<string>('drv-jbeil-1');
   const [orders, setOrders] = useState<Order[]>([]);
   const [tripLogs, setTripLogs] = useState<TripLog[]>([]);
+  const [socketConnected, setSocketConnected] = useState<boolean>(false);
 
   // Modals
   const [showNetworkModal, setShowNetworkModal] = useState(false);
@@ -47,7 +57,25 @@ export default function App() {
   // Map inspection state for Split View on Desktop
   const [mapSelectedDriver, setMapSelectedDriver] = useState<Driver | null>(null);
 
-  // 1. Initial Load from Server
+  // 1. URL Query Parameter Bootstrap
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const tabParam = params.get('tab');
+    if (tabParam === 'driver' || tabParam === 'lead' || tabParam === 'customer' || tabParam === 'company') {
+      setActiveTab(tabParam);
+    }
+    const trackParam = params.get('track');
+    if (trackParam) {
+      setInitialTrackingCode(trackParam);
+      setActiveTab('customer');
+    }
+    const inviteParam = params.get('invite');
+    if (inviteParam) {
+      setShowNetworkModal(true);
+    }
+  }, []);
+
+  // 2. Fetch all initial data
   const fetchAllData = useCallback(async () => {
     try {
       const [netRes, drvRes, ordRes, tripRes] = await Promise.all([
@@ -90,65 +118,156 @@ export default function App() {
     fetchAllData();
   }, [fetchAllData]);
 
-  // Periodic Telemetry Sync every 3.5 seconds
+  // 3. Socket.IO Real-time Connection & Event Listeners
   useEffect(() => {
+    const socket = getSocket();
+
+    const onConnect = () => {
+      setSocketConnected(true);
+      joinCompanyRoom(currentNetwork.id || currentNetwork.code);
+      if (currentDriverId) {
+        joinDriverRoom(currentDriverId);
+      }
+    };
+
+    const onDisconnect = () => {
+      setSocketConnected(false);
+    };
+
+    if (socket.connected) {
+      onConnect();
+    }
+
+    socket.on('connect', onConnect);
+    socket.on('disconnect', onDisconnect);
+
+    // Live driver location update broadcast
+    const onDriverLocation = (data: { driverId: string; location: Driver['currentLocation']; status: Driver['status'] }) => {
+      setDrivers((prev) =>
+        prev.map((d) => (d.id === data.driverId ? { ...d, currentLocation: data.location, status: data.status } : d))
+      );
+    };
+
+    // Driver joined event
+    const onDriverJoined = (newDriver: Driver) => {
+      setDrivers((prev) => {
+        if (prev.some((d) => d.id === newDriver.id)) return prev;
+        return [...prev, newDriver];
+      });
+    };
+
+    // Order events
+    const onOrderCreated = (newOrder: Order) => {
+      setOrders((prev) => {
+        if (prev.some((o) => o.id === newOrder.id)) return prev;
+        return [newOrder, ...prev];
+      });
+    };
+
+    const onOrderAssigned = (data: { order: Order; driverId: string }) => {
+      setOrders((prev) =>
+        prev.map((o) => (o.id === data.order.id ? data.order : o))
+      );
+    };
+
+    const onOrderStatusChanged = (data: { orderId: string; status: Order['status'] }) => {
+      setOrders((prev) =>
+        prev.map((o) => (o.id === data.orderId ? { ...o, status: data.status } : o))
+      );
+    };
+
+    const onOrderUpdated = (updatedOrder: Order) => {
+      setOrders((prev) =>
+        prev.some((o) => o.id === updatedOrder.id)
+          ? prev.map((o) => (o.id === updatedOrder.id ? updatedOrder : o))
+          : [updatedOrder, ...prev]
+      );
+    };
+
+    socket.on('driver:location', onDriverLocation);
+    socket.on('driver:joined', onDriverJoined);
+    socket.on('order:created', onOrderCreated);
+    socket.on('order:assigned', onOrderAssigned);
+    socket.on('order:status_changed', onOrderStatusChanged);
+    socket.on('order:updated', onOrderUpdated);
+
+    return () => {
+      socket.off('connect', onConnect);
+      socket.off('disconnect', onDisconnect);
+      socket.off('driver:location', onDriverLocation);
+      socket.off('driver:joined', onDriverJoined);
+      socket.off('order:created', onOrderCreated);
+      socket.off('order:assigned', onOrderAssigned);
+      socket.off('order:status_changed', onOrderStatusChanged);
+      socket.off('order:updated', onOrderUpdated);
+    };
+  }, [currentNetwork.id, currentNetwork.code, currentDriverId]);
+
+  // Periodic fallback polling every 6 seconds
+  useEffect(() => {
+    if (socketConnected) return;
+
     const interval = setInterval(() => {
       fetch(`/api/drivers?networkCode=${currentNetwork.code}`)
         .then((res) => res.json())
         .then((data) => {
-          if (Array.isArray(data)) {
-            setDrivers(data);
-          }
+          if (Array.isArray(data)) setDrivers(data);
         })
         .catch(() => {});
 
       fetch(`/api/orders?networkCode=${currentNetwork.code}`)
         .then((res) => res.json())
         .then((data) => {
-          if (Array.isArray(data)) {
-            setOrders(data);
-          }
+          if (Array.isArray(data)) setOrders(data);
         })
         .catch(() => {});
-    }, 3500);
+    }, 6000);
 
     return () => clearInterval(interval);
-  }, [currentNetwork.code]);
+  }, [currentNetwork.code, socketConnected]);
 
   // Current Driver Object
-  const currentDriver = drivers.find((d) => d.id === currentDriverId) || drivers[0] || {
-    id: 'drv-lead-1',
-    name: 'Tarek Haddad',
-    phone: '+961 70 123 456',
-    vehicleModel: 'Toyota Hilux Pickup',
-    plateNumber: 'T-48291',
-    networkCode: currentNetwork.code,
-    isLeadDriver: true,
-    status: 'available',
-    currentLocation: {
-      lat: 34.4367,
-      lng: 35.8308,
-      speed: 0,
-      heading: 0,
-      accuracy: 5,
-      timestamp: Date.now(),
-    },
-    totalTrips: 142,
-    rating: 4.9,
-  };
+  const currentDriver =
+    drivers.find((d) => d.id === currentDriverId) ||
+    drivers[0] || {
+      id: 'drv-jbeil-1',
+      name: 'Charbel Abi Nader',
+      phone: '+961 70 112 233',
+      vehicleModel: 'Toyota HiAce Minibus',
+      plateNumber: 'J-48192',
+      networkCode: currentNetwork.code,
+      isLeadDriver: true,
+      status: 'AVAILABLE',
+      currentLocation: {
+        lat: 34.1238,
+        lng: 35.6698,
+        speed: 0,
+        heading: 0,
+        accuracy: 5,
+        timestamp: Date.now(),
+      },
+      totalTrips: 184,
+      rating: 4.95,
+    };
 
   // Active order for current driver
   const activeOrderForCurrentDriver = orders.find(
-    (o) => o.assignedDriverId === currentDriver.id && o.status !== 'delivered' && o.status !== 'cancelled'
+    (o) =>
+      o.assignedDriverId === currentDriver.id &&
+      o.status.toUpperCase() !== 'DELIVERED' &&
+      o.status.toUpperCase() !== 'CANCELLED'
   );
 
-  // Handlers
+  // Location handler from Driver Phone Cockpit
   const handleUpdateLocation = async (loc: {
     lat: number;
     lng: number;
     speed: number;
     heading: number;
     accuracy: number;
+    batteryLevel?: number;
+    networkStatus?: 'wifi' | '4g' | '3g' | 'offline';
+    isSimulated?: boolean;
   }) => {
     // 1. Optimistic local update
     setDrivers((prev) =>
@@ -165,15 +284,11 @@ export default function App() {
       )
     );
 
-    // 2. Post telemetry to server for other drivers & customers
+    // 2. Post telemetry to server (handles offline queueing if offline)
     try {
-      await fetch('/api/telemetry', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          driverId: currentDriver.id,
-          ...loc,
-        }),
+      await api.updateLocation({
+        driverId: currentDriver.id,
+        ...loc,
       });
     } catch (err) {
       console.warn('Telemetry post failed', err);
@@ -211,19 +326,12 @@ export default function App() {
 
   const handleCreateOrder = async (orderData: Partial<Order>) => {
     try {
-      const res = await fetch('/api/orders', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          networkCode: currentNetwork.code,
-          ...orderData,
-        }),
+      const newOrder = await api.createOrder({
+        networkCode: currentNetwork.code,
+        ...orderData,
       });
-      if (res.ok) {
-        const newOrder = await res.json();
-        setOrders((prev) => [newOrder, ...prev]);
-        fetchAllData();
-      }
+      setOrders((prev) => [newOrder, ...prev]);
+      fetchAllData();
     } catch (err) {
       console.error(err);
     }
@@ -231,14 +339,8 @@ export default function App() {
 
   const handleAssignOrder = async (orderId: string, driverId: string) => {
     try {
-      const res = await fetch(`/api/orders/${orderId}/assign`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ driverId }),
-      });
-      if (res.ok) {
-        fetchAllData();
-      }
+      await api.assignOrder(orderId, driverId);
+      fetchAllData();
     } catch (err) {
       console.error(err);
     }
@@ -246,14 +348,8 @@ export default function App() {
 
   const handleUpdateOrderStatus = async (orderId: string, status: Order['status']) => {
     try {
-      const res = await fetch(`/api/orders/${orderId}/status`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status }),
-      });
-      if (res.ok) {
-        fetchAllData();
-      }
+      await api.updateOrderStatus(orderId, status);
+      fetchAllData();
     } catch (err) {
       console.error(err);
     }
@@ -293,27 +389,20 @@ export default function App() {
     isLeadDriver: boolean;
   }) => {
     try {
-      const res = await fetch('/api/drivers/join', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: data.driverName,
-          phone: data.phone,
-          vehicleModel: data.vehicleModel,
-          plateNumber: data.plateNumber,
-          networkCode: data.networkCode,
-          isLeadDriver: data.isLeadDriver,
-        }),
+      const newDriver = await api.joinFleet({
+        networkCode: data.networkCode,
+        name: data.driverName,
+        phone: data.phone,
+        vehicleModel: data.vehicleModel,
+        plateNumber: data.plateNumber,
+        isLeadDriver: data.isLeadDriver,
       });
-      if (res.ok) {
-        const newDriver = await res.json();
-        setDrivers((prev) => [...prev, newDriver]);
-        setCurrentDriverId(newDriver.id);
-        const netMatch = networks.find((n) => n.code === data.networkCode);
-        if (netMatch) setCurrentNetwork(netMatch);
-        setShowNetworkModal(false);
-        fetchAllData();
-      }
+      setDrivers((prev) => [...prev, newDriver]);
+      setCurrentDriverId(newDriver.id);
+      const netMatch = networks.find((n) => n.code === data.networkCode);
+      if (netMatch) setCurrentNetwork(netMatch);
+      setShowNetworkModal(false);
+      fetchAllData();
     } catch (err) {
       console.error(err);
     }
@@ -329,131 +418,114 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-amber-500 selection:text-slate-950">
-      {/* Top Application Bar */}
-      <header className="sticky top-0 z-40 bg-slate-900/95 backdrop-blur-xl border-b border-slate-800 px-4 py-2.5">
-        <div className="max-w-7xl mx-auto flex items-center justify-between gap-2">
-          {/* Logo & Network Selector */}
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-emerald-500 to-teal-400 flex items-center justify-center text-slate-950 font-black shadow-lg shadow-emerald-500/20">
-              <Navigation className="w-5 h-5 fill-current" />
-            </div>
-            <div>
-              <div className="flex items-center gap-1.5">
-                <span className="font-extrabold text-sm tracking-tight text-slate-100">
-                  North Lebanon Fleet
-                </span>
-                <span className="hidden sm:inline-flex items-center gap-1 text-[10px] font-bold text-emerald-400 bg-emerald-950/60 border border-emerald-800/80 px-1.5 py-0.2 rounded-full">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
-                  OSM GPS
-                </span>
-              </div>
-              <button
-                id="btn-header-network-switcher"
-                onClick={() => setShowNetworkModal(true)}
-                className="flex items-center gap-1 text-xs text-amber-400 hover:text-amber-300 transition-colors font-medium"
-              >
-                <span>Net: {currentNetwork.name}</span>
-                <span className="font-mono bg-amber-950/60 border border-amber-800/80 text-[10px] px-1 rounded font-bold">
-                  {currentNetwork.code}
-                </span>
-                <ChevronDown className="w-3 h-3" />
-              </button>
-            </div>
+    <div className="min-h-screen bg-[#0a0a0f] text-white flex flex-col font-sans selection:bg-[#3b82f6]/30">
+      {/* Top Application Bar - Slim & Clean 52px */}
+      <header className="sticky top-0 z-40 bg-[#0a0a0f]/95 backdrop-blur-md border-b border-white/[0.06] h-[52px] px-4 sm:px-6">
+        <div className="max-w-7xl h-full mx-auto flex items-center justify-between gap-4">
+          {/* Logo Wordmark & Network Name */}
+          <div className="flex flex-col justify-center">
+            <span className="text-white font-medium text-base tracking-tight leading-none">ONTime</span>
+            <button
+              id="btn-header-network-switcher"
+              onClick={() => setShowNetworkModal(true)}
+              className="text-[11px] text-[#94a3b8] hover:text-white transition-colors flex items-center gap-1 mt-1 leading-none text-left"
+            >
+              <span>{currentNetwork.name}</span>
+              <span className="font-mono text-[#4a5568]">({currentNetwork.code})</span>
+            </button>
           </div>
 
-          {/* Quick Actions & Trip Logs */}
-          <div className="flex items-center gap-2">
+          {/* Right Side: Socket status, Driver dropdown, Plain text actions */}
+          <div className="flex items-center gap-4 sm:gap-6 text-xs">
+            {/* Minimal socket status: small dot with text, no badge box */}
+            <div className="flex items-center gap-1.5">
+              {socketConnected ? (
+                <span className="relative flex h-2 w-2">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#22c55e] opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-[#22c55e]"></span>
+                </span>
+              ) : (
+                <span className="w-2 h-2 rounded-full bg-[#4a5568]" />
+              )}
+              <span className={socketConnected ? 'text-[#94a3b8]' : 'text-[#4a5568]'}>
+                {socketConnected ? 'Live' : 'Offline'}
+              </span>
+            </div>
+
+            {/* Driver selector: clean minimal dropdown, no border box */}
+            {drivers.length > 0 && (
+              <div className="hidden sm:flex items-center gap-1">
+                <select
+                  value={currentDriverId}
+                  onChange={(e) => setCurrentDriverId(e.target.value)}
+                  className="bg-transparent text-xs text-[#94a3b8] hover:text-white outline-none cursor-pointer pr-1 transition-colors"
+                >
+                  {drivers.map((d) => (
+                    <option key={d.id} value={d.id} className="bg-[#13131a] text-white">
+                      {d.name} {d.isLeadDriver ? '(Lead)' : ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            {/* Trip Logs: plain text button with subtle hover underline */}
             <button
               id="btn-open-trip-logs"
               onClick={() => setShowTripHistoryModal(true)}
-              className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-bold rounded-xl flex items-center gap-1.5 transition-all shadow"
+              className="text-[#94a3b8] hover:text-white hover:underline transition-colors hidden sm:inline"
             >
-              <Route className="w-3.5 h-3.5 text-blue-400" />
-              <span className="hidden sm:inline">Trip Logs</span>
-              <span className="bg-slate-900 text-slate-400 px-1.5 py-0.2 rounded-full text-[10px] font-mono">
-                {tripLogs.length}
-              </span>
+              Trip Logs
             </button>
 
+            {/* Join / Switch: plain text button with subtle hover underline */}
             <button
               id="btn-header-network-code"
               onClick={() => setShowNetworkModal(true)}
-              className="px-3 py-1.5 bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-300 text-xs font-bold rounded-xl flex items-center gap-1.5 transition-all"
+              className="text-[#94a3b8] hover:text-white hover:underline transition-colors"
             >
-              <Building2 className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Join / Switch</span>
+              Switch Fleet
             </button>
           </div>
         </div>
       </header>
 
-      {/* Main View Container */}
-      <main className="flex-1 max-w-7xl w-full mx-auto p-3 sm:p-5 flex flex-col">
-        {/* Android / Desktop Mode Selector Tabs */}
-        <div className="flex items-center justify-between mb-4 bg-slate-900/80 border border-slate-800 p-1 rounded-2xl">
-          <div className="grid grid-cols-4 w-full gap-1 text-xs font-bold">
-            <button
-              id="tab-driver-phone"
-              onClick={() => setActiveTab('driver')}
-              className={`py-2.5 px-2 rounded-xl flex items-center justify-center gap-1.5 transition-all ${
-                activeTab === 'driver'
-                  ? 'bg-amber-500 text-slate-950 shadow-lg shadow-amber-500/20'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              <Car className="w-4 h-4" />
-              <span className="hidden sm:inline">Driver Phone</span>
-              <span className="sm:hidden">Driver</span>
-            </button>
-
-            <button
-              id="tab-lead-dispatch"
-              onClick={() => setActiveTab('lead')}
-              className={`py-2.5 px-2 rounded-xl flex items-center justify-center gap-1.5 transition-all ${
-                activeTab === 'lead'
-                  ? 'bg-amber-500 text-slate-950 shadow-lg shadow-amber-500/20'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              <Navigation className="w-4 h-4" />
-              <span className="hidden sm:inline">Main Dispatcher</span>
-              <span className="sm:hidden">Dispatch</span>
-            </button>
-
-            <button
-              id="tab-customer-tracking"
-              onClick={() => setActiveTab('customer')}
-              className={`py-2.5 px-2 rounded-xl flex items-center justify-center gap-1.5 transition-all ${
-                activeTab === 'customer'
-                  ? 'bg-emerald-500 text-slate-950 shadow-lg shadow-emerald-500/20'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              <MapPin className="w-4 h-4" />
-              <span className="hidden sm:inline">Customer ETA</span>
-              <span className="sm:hidden">Track</span>
-            </button>
-
-            <button
-              id="tab-company-dashboard"
-              onClick={() => setActiveTab('company')}
-              className={`py-2.5 px-2 rounded-xl flex items-center justify-center gap-1.5 transition-all ${
-                activeTab === 'company'
-                  ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/20'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              <LayoutDashboard className="w-4 h-4" />
-              <span className="hidden sm:inline">Fleet Dashboard</span>
-              <span className="sm:hidden">Fleet</span>
-            </button>
-          </div>
+      {/* Tabs: Flush below header with bottom border separating from content */}
+      <div className="border-b border-white/[0.06] bg-[#0a0a0f] sticky top-[52px] z-30 px-4 sm:px-6">
+        <div className="max-w-7xl mx-auto flex items-center gap-8">
+          {[
+            { id: 'driver', label: 'Driver', icon: Car },
+            { id: 'lead', label: 'Dispatch', icon: Navigation },
+            { id: 'customer', label: 'Track', icon: MapPin },
+            { id: 'company', label: 'Fleet', icon: LayoutDashboard },
+          ].map((tab) => {
+            const Icon = tab.icon;
+            const isActive = activeTab === tab.id;
+            return (
+              <button
+                key={tab.id}
+                id={`tab-${tab.id}`}
+                onClick={() => setActiveTab(tab.id as 'driver' | 'lead' | 'customer' | 'company')}
+                className={`py-3 text-xs font-medium transition-colors relative flex items-center gap-1.5 ${
+                  isActive ? 'text-white' : 'text-[#94a3b8] hover:text-white'
+                }`}
+              >
+                <Icon className={`w-3.5 h-3.5 ${isActive ? 'text-[#3b82f6]' : 'text-[#94a3b8]'}`} />
+                <span>{tab.label}</span>
+                {isActive && (
+                  <span className="absolute bottom-0 left-0 right-0 h-[2px] bg-[#3b82f6]" />
+                )}
+              </button>
+            );
+          })}
         </div>
+      </div>
 
+      {/* Main View Container */}
+      <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 flex flex-col">
         {/* Tab 1: Driver Mobile Cockpit */}
         {activeTab === 'driver' && (
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
             <div className="lg:col-span-6">
               <DriverPhoneView
                 currentDriver={currentDriver}
@@ -466,8 +538,8 @@ export default function App() {
               />
             </div>
 
-            {/* Accompanying OpenStreetMap Live Radar for Driver */}
-            <div className="hidden lg:block lg:col-span-6 h-[640px] rounded-3xl overflow-hidden border border-slate-800 shadow-2xl relative sticky top-20">
+            {/* Edge-to-edge side panel map (no rounded corners) */}
+            <div className="hidden lg:block lg:col-span-6 h-[calc(100vh-140px)] sticky top-[116px] border border-white/[0.06]">
               <MapComponent
                 drivers={[currentDriver]}
                 selectedDriverId={currentDriver.id}
@@ -475,6 +547,7 @@ export default function App() {
                 orders={activeOrderForCurrentDriver ? [activeOrderForCurrentDriver] : []}
                 height="100%"
                 followDriver={true}
+                className="w-full h-full"
               />
             </div>
           </div>
@@ -482,7 +555,7 @@ export default function App() {
 
         {/* Tab 2: Lead Driver Dispatch Console */}
         {activeTab === 'lead' && (
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
             <div className="lg:col-span-7">
               <LeadDriverDispatchView
                 currentDriver={currentDriver}
@@ -494,12 +567,14 @@ export default function App() {
               />
             </div>
 
-            <div className="hidden lg:block lg:col-span-5 h-[640px] rounded-3xl overflow-hidden border border-slate-800 shadow-2xl relative sticky top-20">
+            {/* Edge-to-edge side panel map (no rounded corners) */}
+            <div className="hidden lg:block lg:col-span-5 h-[calc(100vh-140px)] sticky top-[116px] border border-white/[0.06]">
               <MapComponent
                 drivers={drivers}
                 selectedDriverId={mapSelectedDriver?.id || currentDriver.id}
                 orders={orders}
                 height="100%"
+                className="w-full h-full"
               />
             </div>
           </div>
@@ -507,7 +582,11 @@ export default function App() {
 
         {/* Tab 3: Customer Live Tracking View */}
         {activeTab === 'customer' && (
-          <CustomerTrackingView orders={orders} drivers={drivers} />
+          <CustomerTrackingView
+            orders={orders}
+            drivers={drivers}
+            initialTrackingCode={initialTrackingCode}
+          />
         )}
 
         {/* Tab 4: Fleet Company Central Dashboard */}
@@ -532,47 +611,29 @@ export default function App() {
         )}
       </main>
 
-      {/* Persistent Android Mobile Navigation Bar for ergonomic thumb reach */}
-      <nav className="sm:hidden fixed bottom-0 left-0 right-0 z-50 bg-slate-900/95 backdrop-blur-xl border-t border-slate-800 px-3 py-2 flex items-center justify-around">
-        <button
-          onClick={() => setActiveTab('driver')}
-          className={`flex flex-col items-center gap-0.5 text-[10px] font-bold ${
-            activeTab === 'driver' ? 'text-amber-400' : 'text-slate-400'
-          }`}
-        >
-          <Car className="w-5 h-5" />
-          <span>Driver</span>
-        </button>
-
-        <button
-          onClick={() => setActiveTab('lead')}
-          className={`flex flex-col items-center gap-0.5 text-[10px] font-bold ${
-            activeTab === 'lead' ? 'text-amber-400' : 'text-slate-400'
-          }`}
-        >
-          <Navigation className="w-5 h-5" />
-          <span>Dispatch</span>
-        </button>
-
-        <button
-          onClick={() => setActiveTab('customer')}
-          className={`flex flex-col items-center gap-0.5 text-[10px] font-bold ${
-            activeTab === 'customer' ? 'text-emerald-400' : 'text-slate-400'
-          }`}
-        >
-          <MapPin className="w-5 h-5" />
-          <span>Tracking</span>
-        </button>
-
-        <button
-          onClick={() => setActiveTab('company')}
-          className={`flex flex-col items-center gap-0.5 text-[10px] font-bold ${
-            activeTab === 'company' ? 'text-blue-400' : 'text-slate-400'
-          }`}
-        >
-          <LayoutDashboard className="w-5 h-5" />
-          <span>Fleet</span>
-        </button>
+      {/* Persistent Mobile Bottom Navigation Bar */}
+      <nav className="sm:hidden fixed bottom-0 left-0 right-0 z-50 bg-[#0a0a0f]/95 backdrop-blur-md border-t border-white/[0.06] px-4 py-2 flex items-center justify-around">
+        {[
+          { id: 'driver', label: 'Driver', icon: Car },
+          { id: 'lead', label: 'Dispatch', icon: Navigation },
+          { id: 'customer', label: 'Track', icon: MapPin },
+          { id: 'company', label: 'Fleet', icon: LayoutDashboard },
+        ].map((item) => {
+          const Icon = item.icon;
+          const isActive = activeTab === item.id;
+          return (
+            <button
+              key={item.id}
+              onClick={() => setActiveTab(item.id as 'driver' | 'lead' | 'customer' | 'company')}
+              className={`flex flex-col items-center gap-1 text-[11px] font-medium transition-colors ${
+                isActive ? 'text-white' : 'text-[#94a3b8]'
+              }`}
+            >
+              <Icon className={`w-4 h-4 ${isActive ? 'text-[#3b82f6]' : 'text-[#94a3b8]'}`} />
+              <span>{item.label}</span>
+            </button>
+          );
+        })}
       </nav>
 
       {/* Modals */}

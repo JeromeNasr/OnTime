@@ -1,21 +1,7 @@
 import React, { useState } from 'react';
-import {
-  Users,
-  Car,
-  Activity,
-  Award,
-  Plus,
-  Share2,
-  Copy,
-  Check,
-  Shield,
-  Clock,
-  Gauge,
-  MapPin,
-  TrendingUp,
-} from 'lucide-react';
+import { Copy, Check, Plus, UserPlus } from 'lucide-react';
 import { Driver, Order, Network, TripLog } from '../types';
-import { MapComponent } from './MapComponent';
+import { StatusChip } from './StatusChip';
 
 interface CompanyDashboardViewProps {
   network: Network;
@@ -30,7 +16,6 @@ export const CompanyDashboardView: React.FC<CompanyDashboardViewProps> = ({
   network,
   drivers,
   orders,
-  tripLogs,
   onAddDriver,
   onSetLeadDriver,
 }) => {
@@ -41,19 +26,29 @@ export const CompanyDashboardView: React.FC<CompanyDashboardViewProps> = ({
   const [newDriverPlate, setNewDriverPlate] = useState('');
   const [isLeadDriverCheck, setIsLeadDriverCheck] = useState(false);
   const [copiedCode, setCopiedCode] = useState(false);
-  const [selectedDriver, setSelectedDriver] = useState<Driver | null>(null);
 
   // Performance calculations
   const totalDrivers = drivers.length;
-  const activeEnRoute = drivers.filter((d) => d.status === 'busy' || d.currentLocation.speed > 5).length;
-  const idleDrivers = drivers.filter((d) => d.status === 'available').length;
-  const totalDeliveries = orders.filter((o) => o.status === 'delivered').length;
+  const activeNow = drivers.filter(
+    (d) =>
+      d.status === 'busy' ||
+      d.status === 'EN_ROUTE_DELIVERY' ||
+      d.status === 'AVAILABLE' ||
+      d.status === 'available' ||
+      d.currentLocation.speed > 0
+  ).length;
+  const ordersToday = orders.length;
 
-  const avgFleetSpeed = totalDrivers > 0
-    ? Math.round(drivers.reduce((acc, d) => acc + d.currentLocation.speed, 0) / totalDrivers)
-    : 0;
-
-  const totalDistanceKm = tripLogs.reduce((acc, t) => acc + t.distanceKm, 0);
+  // Format relative time helper
+  const getTimeAgo = (timestamp?: number) => {
+    if (!timestamp) return 'Just now';
+    const diffSec = Math.floor((Date.now() - timestamp) / 1000);
+    if (diffSec < 60) return 'Just now';
+    const diffMin = Math.floor(diffSec / 60);
+    if (diffMin < 60) return `${diffMin}m ago`;
+    const diffHr = Math.floor(diffMin / 60);
+    return `${diffHr}h ago`;
+  };
 
   const handleCopyCode = () => {
     navigator.clipboard.writeText(network.code);
@@ -63,13 +58,13 @@ export const CompanyDashboardView: React.FC<CompanyDashboardViewProps> = ({
 
   const handleAddDriverSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newDriverName || !newDriverPlate) return;
+    if (!newDriverName.trim() || !newDriverPlate.trim()) return;
 
     onAddDriver({
-      name: newDriverName,
-      phone: newDriverPhone || '+961 70 000 000',
-      vehicleModel: newDriverVehicle || 'Fleet Van',
-      plateNumber: newDriverPlate,
+      name: newDriverName.trim(),
+      phone: newDriverPhone.trim() || '+961 70 000 000',
+      vehicleModel: newDriverVehicle.trim() || 'Fleet Van',
+      plateNumber: newDriverPlate.trim(),
       isLeadDriver: isLeadDriverCheck,
       networkCode: network.code,
     });
@@ -83,308 +78,258 @@ export const CompanyDashboardView: React.FC<CompanyDashboardViewProps> = ({
   };
 
   return (
-    <div className="w-full flex flex-col gap-5 pb-12">
-      {/* Network Header & Join Banner */}
-      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+    <div className="w-full flex flex-col gap-6 pb-12">
+      {/* Network Header & Controls */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-[#13131a] border border-white/[0.06] rounded-xl p-5">
         <div>
-          <div className="flex items-center gap-2 mb-1">
-            <span className="text-[11px] font-bold uppercase tracking-wider text-emerald-400">
-              Fleet Network Control Center
-            </span>
-            <span className="bg-slate-800 text-slate-300 text-[10px] font-mono px-2 py-0.5 rounded">
-              North Lebanon
-            </span>
-          </div>
-          <h1 className="text-xl font-black text-slate-100">{network.name}</h1>
-          <p className="text-xs text-slate-400 mt-0.5">
-            Managed by <strong className="text-slate-200">{network.ownerName}</strong> • {totalDrivers} connected vehicles
+          <div className="text-xs text-[#94a3b8]">Fleet Network</div>
+          <h1 className="text-lg font-bold text-white mt-0.5">{network.name}</h1>
+          <p className="text-xs text-[#4a5568] mt-0.5">
+            Owner: {network.ownerName}
           </p>
         </div>
 
-        {/* Join Code Card & Add Driver Action */}
-        <div className="flex items-center gap-3 w-full md:w-auto">
-          <div className="bg-slate-950 border border-slate-800 px-3.5 py-2 rounded-xl flex items-center gap-2.5">
-            <div>
-              <span className="text-[9px] uppercase font-bold text-slate-500 block">
-                Network Join Code
-              </span>
-              <span className="text-sm font-black font-mono tracking-wider text-amber-400">
-                {network.code}
-              </span>
-            </div>
+        <div className="flex items-center gap-3">
+          {/* Join Code Display */}
+          <div className="flex items-center gap-2 bg-[#0a0a0f] border border-white/[0.06] px-3 py-1.5 rounded-lg">
+            <span className="text-[11px] text-[#4a5568]">Join Code:</span>
+            <span className="font-mono text-xs font-bold text-white tracking-wider">
+              {network.code}
+            </span>
             <button
               id="btn-copy-network-code"
               onClick={handleCopyCode}
-              title="Copy join code for drivers"
-              className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 transition-colors"
+              title="Copy code"
+              className="text-[#94a3b8] hover:text-white transition-colors"
             >
-              {copiedCode ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+              {copiedCode ? <Check className="w-3.5 h-3.5 text-[#22c55e]" /> : <Copy className="w-3.5 h-3.5" />}
             </button>
           </div>
 
           <button
             id="btn-open-add-driver-modal"
             onClick={() => setShowAddDriverModal(true)}
-            className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl shadow-lg shadow-emerald-600/20 flex items-center gap-1.5 transition-all"
+            className="px-3 py-1.5 bg-[#3b82f6] hover:bg-blue-600 text-white text-xs font-medium rounded-lg transition-colors flex items-center gap-1.5"
           >
-            <Plus className="w-4 h-4" /> Add Driver
+            <Plus className="w-3.5 h-3.5" />
+            <span>Add Driver</span>
           </button>
         </div>
       </div>
 
-      {/* KPI Performance Metrics */}
-      <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
-        <div className="bg-slate-900 border border-slate-800 p-3.5 rounded-xl">
-          <div className="flex items-center justify-between text-slate-400 mb-1">
-            <span className="text-[11px] font-semibold uppercase">Total Fleet</span>
-            <Users className="w-4 h-4 text-blue-400" />
-          </div>
-          <div className="text-2xl font-black font-mono text-slate-100">{totalDrivers}</div>
-          <div className="text-[10px] text-slate-500 mt-1">Vehicles registered</div>
+      {/* Summary Stat Row at Top (4 Cards) */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <div className="bg-[#13131a] border border-white/[0.06] rounded-xl p-4">
+          <div className="text-xs text-[#94a3b8]">Total Drivers</div>
+          <div className="text-2xl font-bold text-white mt-1 tabular-nums">{totalDrivers}</div>
         </div>
 
-        <div className="bg-slate-900 border border-slate-800 p-3.5 rounded-xl">
-          <div className="flex items-center justify-between text-slate-400 mb-1">
-            <span className="text-[11px] font-semibold uppercase">Active En Route</span>
-            <Activity className="w-4 h-4 text-emerald-400" />
-          </div>
-          <div className="text-2xl font-black font-mono text-emerald-400">{activeEnRoute}</div>
-          <div className="text-[10px] text-slate-500 mt-1">{idleDrivers} available / idle</div>
+        <div className="bg-[#13131a] border border-white/[0.06] rounded-xl p-4">
+          <div className="text-xs text-[#94a3b8]">Active Now</div>
+          <div className="text-2xl font-bold text-white mt-1 tabular-nums">{activeNow}</div>
         </div>
 
-        <div className="bg-slate-900 border border-slate-800 p-3.5 rounded-xl">
-          <div className="flex items-center justify-between text-slate-400 mb-1">
-            <span className="text-[11px] font-semibold uppercase">Fleet Speed</span>
-            <Gauge className="w-4 h-4 text-amber-400" />
-          </div>
-          <div className="text-2xl font-black font-mono text-amber-400">
-            {avgFleetSpeed} <span className="text-xs font-normal text-slate-500">km/h</span>
-          </div>
-          <div className="text-[10px] text-slate-500 mt-1">Real-time GPS average</div>
+        <div className="bg-[#13131a] border border-white/[0.06] rounded-xl p-4">
+          <div className="text-xs text-[#94a3b8]">Orders Today</div>
+          <div className="text-2xl font-bold text-white mt-1 tabular-nums">{ordersToday}</div>
         </div>
 
-        <div className="bg-slate-900 border border-slate-800 p-3.5 rounded-xl">
-          <div className="flex items-center justify-between text-slate-400 mb-1">
-            <span className="text-[11px] font-semibold uppercase">Completed</span>
-            <Award className="w-4 h-4 text-purple-400" />
-          </div>
-          <div className="text-2xl font-black font-mono text-purple-400">{totalDeliveries}</div>
-          <div className="text-[10px] text-slate-500 mt-1">Orders delivered</div>
-        </div>
-
-        <div className="col-span-2 lg:col-span-1 bg-slate-900 border border-slate-800 p-3.5 rounded-xl">
-          <div className="flex items-center justify-between text-slate-400 mb-1">
-            <span className="text-[11px] font-semibold uppercase">Trip Mileage</span>
-            <TrendingUp className="w-4 h-4 text-cyan-400" />
-          </div>
-          <div className="text-2xl font-black font-mono text-cyan-400">
-            {totalDistanceKm.toFixed(1)} <span className="text-xs font-normal text-slate-500">km</span>
-          </div>
-          <div className="text-[10px] text-slate-500 mt-1">North Lebanon logged</div>
+        <div className="bg-[#13131a] border border-white/[0.06] rounded-xl p-4">
+          <div className="text-xs text-[#94a3b8]">Avg ETA</div>
+          <div className="text-2xl font-bold text-white mt-1 tabular-nums">14 min</div>
         </div>
       </div>
 
-      {/* Real-time OpenStreetMap Fleet Radar */}
-      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 shadow-xl">
-        <div className="flex items-center justify-between mb-3">
-          <div className="flex items-center gap-2">
-            <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse"></span>
-            <h3 className="text-xs font-bold uppercase tracking-wider text-slate-200">
-              Live Fleet Radar (North Lebanon OpenStreetMap)
-            </h3>
+      {/* Two Columns: Left = Driver List, Right = Recent Orders List */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+        {/* Left Column: Driver List */}
+        <div className="bg-[#13131a] border border-white/[0.06] rounded-xl p-4 sm:p-5 flex flex-col">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-sm font-bold text-white">Drivers</h2>
+            <span className="text-xs text-[#4a5568] tabular-nums font-mono">
+              {drivers.length} registered
+            </span>
           </div>
-          <span className="text-[11px] text-slate-400">
-            Click any car to inspect telemetry and active order
-          </span>
-        </div>
 
-        <div className="h-[440px] rounded-xl overflow-hidden border border-slate-800 relative">
-          <MapComponent
-            drivers={drivers}
-            selectedDriverId={selectedDriver?.id}
-            onSelectDriver={(d) => setSelectedDriver(d)}
-            orders={orders}
-            height="100%"
-          />
-        </div>
-      </div>
+          <div className="flex flex-col gap-2 max-h-[460px] overflow-y-auto pr-1">
+            {drivers.map((driver) => {
+              const isAvailable =
+                driver.status === 'AVAILABLE' || driver.status === 'available';
+              const isBusy =
+                driver.status === 'busy' || driver.status === 'EN_ROUTE_DELIVERY';
 
-      {/* Driver Performance Table */}
-      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 shadow-xl">
-        <div className="flex items-center justify-between mb-3">
-          <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300">
-            Driver Roster & Telemetry Performance
-          </h3>
-          <span className="text-[11px] text-slate-500 font-mono">
-            {drivers.length} Drivers Active
-          </span>
-        </div>
-
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs text-slate-300">
-            <thead className="bg-slate-950 text-slate-400 text-[10px] uppercase font-bold">
-              <tr>
-                <th className="p-3">Driver</th>
-                <th className="p-3">Vehicle & Plate</th>
-                <th className="p-3">Status</th>
-                <th className="p-3">Speedometer</th>
-                <th className="p-3">Trips & Rating</th>
-                <th className="p-3 text-right">Lead Driver</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-800/60">
-              {drivers.map((driver) => (
-                <tr
+              return (
+                <div
                   key={driver.id}
-                  onClick={() => setSelectedDriver(driver)}
-                  className={`hover:bg-slate-850/50 cursor-pointer transition-colors ${
-                    selectedDriver?.id === driver.id ? 'bg-slate-800/50' : ''
-                  }`}
+                  className="bg-[#0a0a0f] border border-white/[0.06] rounded-lg p-3 flex items-center justify-between gap-3 hover:border-white/[0.12] transition-colors"
                 >
-                  <td className="p-3">
-                    <div className="font-bold text-slate-100 flex items-center gap-1.5">
-                      {driver.name}
-                      {driver.isLeadDriver && (
-                        <span className="bg-amber-500/20 text-amber-300 border border-amber-500/30 text-[9px] font-bold px-1 rounded">
-                          LEAD
-                        </span>
-                      )}
+                  <div className="flex items-center gap-3 min-w-0">
+                    {/* Avatar Initial Circle */}
+                    <div className="w-8 h-8 rounded-full bg-[#1e1e28] border border-white/[0.08] flex items-center justify-center text-xs font-bold text-white shrink-0">
+                      {driver.name.charAt(0)}
                     </div>
-                    <div className="text-[10px] text-slate-500 font-mono">{driver.phone}</div>
-                  </td>
 
-                  <td className="p-3">
-                    <div>{driver.vehicleModel}</div>
-                    <div className="font-mono text-[11px] text-slate-400">{driver.plateNumber}</div>
-                  </td>
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-xs font-semibold text-white truncate">
+                          {driver.name}
+                        </span>
+                        {/* Status Dot */}
+                        <span
+                          className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                            isAvailable
+                              ? 'bg-[#22c55e]'
+                              : isBusy
+                              ? 'bg-[#f59e0b]'
+                              : 'bg-[#ef4444]'
+                          }`}
+                          title={driver.status}
+                        />
+                        {driver.isLeadDriver && (
+                          <span className="text-[9px] px-1 py-0.2 rounded bg-white/10 text-white font-medium">
+                            Lead
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-[11px] text-[#94a3b8] truncate mt-0.5">
+                        {driver.vehicleModel} •{' '}
+                        <span className="font-mono text-[#4a5568]">
+                          {driver.plateNumber}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
 
-                  <td className="p-3">
-                    <span
-                      className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
-                        driver.status === 'busy'
-                          ? 'bg-amber-500/20 text-amber-300'
-                          : driver.status === 'available'
-                          ? 'bg-emerald-500/20 text-emerald-300'
-                          : 'bg-slate-800 text-slate-400'
-                      }`}
-                    >
-                      ● {driver.status.toUpperCase()}
-                    </span>
-                  </td>
-
-                  <td className="p-3 font-mono font-bold">
-                    <span
-                      className={
-                        driver.currentLocation.speed > 5
-                          ? 'text-emerald-400'
-                          : 'text-slate-500'
-                      }
-                    >
-                      {Math.round(driver.currentLocation.speed)} km/h
-                    </span>
-                  </td>
-
-                  <td className="p-3">
-                    <div>{driver.totalTrips} Completed</div>
-                    <div className="text-amber-400 font-bold text-[11px]">★ {driver.rating}</div>
-                  </td>
-
-                  <td className="p-3 text-right">
-                    {driver.isLeadDriver ? (
-                      <span className="text-amber-400 font-bold text-[11px] flex items-center justify-end gap-1">
-                        <Shield className="w-3.5 h-3.5" /> Dispatcher
-                      </span>
-                    ) : (
+                  <div className="text-right shrink-0">
+                    <div className="text-[11px] text-[#4a5568]">
+                      {getTimeAgo(driver.currentLocation.timestamp)}
+                    </div>
+                    {!driver.isLeadDriver && (
                       <button
-                        id={`btn-set-lead-${driver.id}`}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onSetLeadDriver(driver.id);
-                        }}
-                        className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-semibold rounded-lg transition-colors"
+                        onClick={() => onSetLeadDriver(driver.id)}
+                        className="text-[10px] text-[#3b82f6] hover:underline mt-0.5"
                       >
                         Make Lead
                       </button>
                     )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Right Column: Recent Orders List */}
+        <div className="bg-[#13131a] border border-white/[0.06] rounded-xl p-4 sm:p-5 flex flex-col">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-sm font-bold text-white">Recent Orders</h2>
+            <span className="text-xs text-[#4a5568] tabular-nums font-mono">
+              {orders.length} total
+            </span>
+          </div>
+
+          <div className="flex flex-col gap-2 max-h-[460px] overflow-y-auto pr-1">
+            {orders.length === 0 ? (
+              <div className="p-6 text-center text-xs text-[#4a5568]">
+                No orders created yet.
+              </div>
+            ) : (
+              orders.map((order) => {
+                const assigned = drivers.find((d) => d.id === order.assignedDriverId);
+
+                return (
+                  <div
+                    key={order.id}
+                    className="bg-[#0a0a0f] border border-white/[0.06] rounded-lg p-3 flex items-center justify-between gap-3 hover:border-white/[0.12] transition-colors"
+                  >
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono text-xs text-[#94a3b8]">
+                          {order.trackingCode || order.id}
+                        </span>
+                        <span className="text-xs font-medium text-white truncate">
+                          {order.customerName}
+                        </span>
+                      </div>
+                      <div className="text-[11px] text-[#4a5568] truncate mt-0.5">
+                        Driver: {assigned ? assigned.name : 'Unassigned'}
+                      </div>
+                    </div>
+
+                    <div className="flex flex-col items-end gap-1 shrink-0">
+                      <StatusChip status={order.status} />
+                      <span className="text-[10px] text-[#4a5568]">
+                        {getTimeAgo(order.createdAt)}
+                      </span>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
         </div>
       </div>
 
       {/* Add Driver Modal */}
       {showAddDriverModal && (
-        <div className="fixed inset-0 z-[1000] bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-md p-6 shadow-2xl">
-            <div className="flex items-center justify-between mb-4">
-              <div className="flex items-center gap-2">
-                <Car className="w-5 h-5 text-emerald-400" />
-                <h3 className="text-base font-bold text-slate-100">Add Driver to Fleet</h3>
-              </div>
+        <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4">
+          <div className="bg-[#13131a] border border-white/[0.08] rounded-xl w-full max-w-[440px] p-5 shadow-2xl flex flex-col gap-4">
+            <div className="flex items-center justify-between border-b border-white/[0.06] pb-3">
+              <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                <UserPlus className="w-4 h-4 text-[#3b82f6]" /> Add Fleet Driver
+              </h3>
               <button
-                id="btn-close-add-driver-modal"
                 onClick={() => setShowAddDriverModal(false)}
-                className="text-slate-400 hover:text-slate-200 text-sm font-bold"
+                className="text-[#94a3b8] hover:text-white text-xs"
               >
                 ✕
               </button>
             </div>
 
-            <form onSubmit={handleAddDriverSubmit} className="space-y-3.5">
+            <form onSubmit={handleAddDriverSubmit} className="flex flex-col gap-3">
               <div>
-                <label className="text-xs font-semibold text-slate-300 block mb-1">
-                  Driver Full Name
-                </label>
+                <label className="block text-[11px] text-[#94a3b8] mb-1">Full Name</label>
                 <input
                   type="text"
-                  required
+                  placeholder="e.g. Walid Mansour"
                   value={newDriverName}
                   onChange={(e) => setNewDriverName(e.target.value)}
-                  placeholder="e.g. Fadi Nabbout"
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-100 outline-none focus:border-emerald-500"
+                  required
+                  className="w-full bg-[#0a0a0f] border border-white/[0.06] focus:border-[#3b82f6] rounded-lg px-3 py-2 text-xs text-white outline-none"
                 />
               </div>
 
               <div>
-                <label className="text-xs font-semibold text-slate-300 block mb-1">
-                  Phone Number
-                </label>
+                <label className="block text-[11px] text-[#94a3b8] mb-1">Phone Number</label>
                 <input
                   type="text"
-                  required
+                  placeholder="+961 70 888 999"
                   value={newDriverPhone}
                   onChange={(e) => setNewDriverPhone(e.target.value)}
-                  placeholder="+961 70 888 999"
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-100 outline-none focus:border-emerald-500"
+                  className="w-full bg-[#0a0a0f] border border-white/[0.06] focus:border-[#3b82f6] rounded-lg px-3 py-2 text-xs text-white outline-none"
                 />
               </div>
 
               <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <label className="text-xs font-semibold text-slate-300 block mb-1">
-                    Vehicle Model
-                  </label>
+                  <label className="block text-[11px] text-[#94a3b8] mb-1">Vehicle Model</label>
                   <input
                     type="text"
+                    placeholder="e.g. Renault Kangoo"
                     value={newDriverVehicle}
                     onChange={(e) => setNewDriverVehicle(e.target.value)}
-                    placeholder="e.g. Toyota Yaris"
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-100 outline-none focus:border-emerald-500"
+                    className="w-full bg-[#0a0a0f] border border-white/[0.06] focus:border-[#3b82f6] rounded-lg px-3 py-2 text-xs text-white outline-none"
                   />
                 </div>
                 <div>
-                  <label className="text-xs font-semibold text-slate-300 block mb-1">
-                    Plate Number
-                  </label>
+                  <label className="block text-[11px] text-[#94a3b8] mb-1">Plate Number</label>
                   <input
                     type="text"
-                    required
+                    placeholder="T-12345"
                     value={newDriverPlate}
                     onChange={(e) => setNewDriverPlate(e.target.value)}
-                    placeholder="e.g. T-92140"
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-100 outline-none focus:border-emerald-500"
+                    required
+                    className="w-full bg-[#0a0a0f] border border-white/[0.06] focus:border-[#3b82f6] rounded-lg px-3 py-2 text-xs text-white outline-none"
                   />
                 </div>
               </div>
@@ -392,29 +337,29 @@ export const CompanyDashboardView: React.FC<CompanyDashboardViewProps> = ({
               <div className="flex items-center gap-2 pt-1">
                 <input
                   type="checkbox"
-                  id="chk-lead-driver"
+                  id="lead-check"
                   checked={isLeadDriverCheck}
                   onChange={(e) => setIsLeadDriverCheck(e.target.checked)}
-                  className="rounded bg-slate-950 border-slate-800 text-emerald-500"
+                  className="accent-[#3b82f6] rounded"
                 />
-                <label htmlFor="chk-lead-driver" className="text-xs text-slate-300 cursor-pointer">
-                  Designate as Main Lead Driver (Order Dispatcher phone)
+                <label htmlFor="lead-check" className="text-xs text-[#94a3b8]">
+                  Grant Lead Driver dispatch authority
                 </label>
               </div>
 
-              <div className="pt-3 flex gap-2">
+              <div className="flex items-center justify-end gap-2 pt-3 border-t border-white/[0.06]">
                 <button
                   type="button"
                   onClick={() => setShowAddDriverModal(false)}
-                  className="w-1/2 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold rounded-xl"
+                  className="px-3 py-1.5 text-xs text-[#94a3b8] hover:text-white rounded-lg"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  className="w-1/2 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-xl shadow-lg shadow-emerald-600/20"
+                  className="px-4 py-1.5 bg-[#3b82f6] hover:bg-blue-600 text-white text-xs font-medium rounded-lg"
                 >
-                  Confirm &amp; Register
+                  Add Driver
                 </button>
               </div>
             </form>

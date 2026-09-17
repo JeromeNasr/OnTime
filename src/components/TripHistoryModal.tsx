@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Clock, MapPin, Gauge, Route, Calendar, ArrowUpRight, X } from 'lucide-react';
+import { X, ChevronRight } from 'lucide-react';
 import { TripLog } from '../types';
 import { MapComponent } from './MapComponent';
 
@@ -12,131 +12,100 @@ export const TripHistoryModal: React.FC<TripHistoryModalProps> = ({ tripLogs, on
   const [selectedTrip, setSelectedTrip] = useState<TripLog | null>(tripLogs[0] || null);
 
   return (
-    <div className="fixed inset-0 z-[1000] bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-3 sm:p-6">
-      <div className="bg-slate-900 border border-slate-800 rounded-3xl w-full max-w-4xl h-[90vh] max-h-[780px] flex flex-col shadow-2xl overflow-hidden">
+    <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4">
+      <div className="bg-[#13131a] border border-white/[0.08] rounded-xl w-full max-w-[480px] max-h-[85vh] p-5 shadow-2xl flex flex-col gap-4 overflow-hidden">
         {/* Header */}
-        <div className="p-4 sm:p-5 border-b border-slate-800 flex items-center justify-between">
-          <div className="flex items-center gap-2.5">
-            <div className="w-9 h-9 rounded-xl bg-blue-500/20 border border-blue-500/30 flex items-center justify-center text-blue-400">
-              <Route className="w-5 h-5" />
-            </div>
-            <div>
-              <h2 className="text-base font-bold text-slate-100">Trip History & GPS Logs</h2>
-              <p className="text-xs text-slate-400">
-                Review past routes, speedometer telemetry, and delivery durations in North Lebanon.
-              </p>
-            </div>
+        <div className="flex items-center justify-between pb-3 border-b border-white/[0.06]">
+          <div>
+            <h2 className="text-sm font-bold text-white">Trip History</h2>
+            <p className="text-xs text-[#94a3b8] mt-0.5">Recorded GPS breadcrumbs & durations</p>
           </div>
           <button
             id="btn-close-trip-history"
             onClick={onClose}
-            className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-slate-200 transition-colors"
+            className="text-[#94a3b8] hover:text-white p-1 rounded-md transition-colors"
           >
-            <X className="w-5 h-5" />
+            <X className="w-4 h-4" />
           </button>
         </div>
 
-        {/* Body Split View */}
-        <div className="flex-1 flex flex-col md:flex-row overflow-hidden">
-          {/* Trip List Sidebar */}
-          <div className="w-full md:w-80 border-b md:border-b-0 md:border-r border-slate-800 p-3 overflow-y-auto space-y-2.5 max-h-56 md:max-h-full">
-            {tripLogs.length === 0 ? (
-              <div className="p-6 text-center text-xs text-slate-500">
-                No trips recorded yet. Use the Driver Phone cockpit to start logging your trip.
+        {/* Selected Trip Details */}
+        {selectedTrip && (
+          <div className="flex flex-col gap-3">
+            <div className="grid grid-cols-4 gap-2 text-center bg-[#0a0a0f] p-3 rounded-lg border border-white/[0.06]">
+              <div>
+                <div className="text-[10px] text-[#4a5568]">Distance</div>
+                <div className="text-xs font-bold text-white font-mono tabular-nums mt-0.5">
+                  {selectedTrip.distanceKm} km
+                </div>
               </div>
-            ) : (
-              tripLogs.map((trip) => (
+              <div>
+                <div className="text-[10px] text-[#4a5568]">Duration</div>
+                <div className="text-xs font-bold text-white font-mono tabular-nums mt-0.5">
+                  {selectedTrip.durationMinutes}m
+                </div>
+              </div>
+              <div>
+                <div className="text-[10px] text-[#4a5568]">Avg Speed</div>
+                <div className="text-xs font-bold text-white font-mono tabular-nums mt-0.5">
+                  {selectedTrip.avgSpeedKmH} km/h
+                </div>
+              </div>
+              <div>
+                <div className="text-[10px] text-[#4a5568]">Max Speed</div>
+                <div className="text-xs font-bold text-white font-mono tabular-nums mt-0.5">
+                  {selectedTrip.maxSpeedKmH} km/h
+                </div>
+              </div>
+            </div>
+
+            {/* Map Path */}
+            <div className="h-44 w-full rounded-lg overflow-hidden border border-white/[0.06]">
+              <MapComponent
+                routePath={selectedTrip.path}
+                focusLocation={
+                  selectedTrip.path.length > 0
+                    ? { lat: selectedTrip.path[0][0], lng: selectedTrip.path[0][1] }
+                    : null
+                }
+                height="100%"
+                className="w-full h-full"
+              />
+            </div>
+          </div>
+        )}
+
+        {/* Trip List */}
+        <div className="flex flex-col gap-2 pt-2 border-t border-white/[0.06] overflow-y-auto max-h-48 pr-1">
+          <div className="text-[11px] text-[#94a3b8] font-medium">All Logged Trips</div>
+          {tripLogs.length === 0 ? (
+            <div className="p-4 text-center text-xs text-[#4a5568]">
+              No logged trips found. Start a trip in the Driver cockpit to log paths.
+            </div>
+          ) : (
+            tripLogs.map((trip) => {
+              const isSelected = selectedTrip?.id === trip.id;
+              return (
                 <div
                   key={trip.id}
                   onClick={() => setSelectedTrip(trip)}
-                  className={`p-3 rounded-2xl border transition-all cursor-pointer ${
-                    selectedTrip?.id === trip.id
-                      ? 'bg-blue-950/40 border-blue-500/50 shadow-lg'
-                      : 'bg-slate-950 border-slate-850 hover:border-slate-700'
+                  className={`p-2.5 rounded-lg border text-xs cursor-pointer flex items-center justify-between transition-colors ${
+                    isSelected
+                      ? 'bg-[#1e1e28] border-[#3b82f6]'
+                      : 'bg-[#0a0a0f] border-white/[0.06] hover:border-white/[0.12]'
                   }`}
                 >
-                  <div className="flex items-center justify-between text-xs mb-1.5">
-                    <span className="font-bold text-slate-200">{trip.driverName}</span>
-                    <span className="text-[10px] text-slate-400 font-mono">
-                      {new Date(trip.startTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                    </span>
-                  </div>
-
-                  <div className="text-[11px] text-slate-400 space-y-1 mb-2">
-                    <div className="truncate flex items-center gap-1">
-                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
-                      <span>{trip.startAddress}</span>
-                    </div>
-                    <div className="truncate flex items-center gap-1">
-                      <span className="w-1.5 h-1.5 rounded-full bg-rose-400"></span>
-                      <span>{trip.endAddress}</span>
+                  <div>
+                    <div className="font-medium text-white">{trip.driverName}</div>
+                    <div className="text-[11px] text-[#4a5568] mt-0.5">
+                      {trip.distanceKm} km • {trip.durationMinutes} min • Avg {trip.avgSpeedKmH} km/h
                     </div>
                   </div>
-
-                  <div className="flex items-center justify-between text-[11px] pt-2 border-t border-slate-800/80 font-mono">
-                    <span className="text-emerald-400 font-bold">{trip.distanceKm} km</span>
-                    <span className="text-slate-400">{trip.durationMinutes} min</span>
-                    <span className="text-amber-400">Avg {trip.avgSpeedKmH} km/h</span>
-                  </div>
+                  <ChevronRight className={`w-3.5 h-3.5 ${isSelected ? 'text-[#3b82f6]' : 'text-[#4a5568]'}`} />
                 </div>
-              ))
-            )}
-          </div>
-
-          {/* Trip Details & Route Visualizer */}
-          <div className="flex-1 flex flex-col p-4 bg-slate-950 overflow-y-auto">
-            {selectedTrip ? (
-              <div className="flex-1 flex flex-col gap-3">
-                {/* Stats Bar */}
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                  <div className="bg-slate-900 border border-slate-800 p-2.5 rounded-xl">
-                    <div className="text-[10px] text-slate-400 uppercase font-semibold">Distance</div>
-                    <div className="text-lg font-bold font-mono text-emerald-400">
-                      {selectedTrip.distanceKm} <span className="text-xs text-slate-500">km</span>
-                    </div>
-                  </div>
-                  <div className="bg-slate-900 border border-slate-800 p-2.5 rounded-xl">
-                    <div className="text-[10px] text-slate-400 uppercase font-semibold">Duration</div>
-                    <div className="text-lg font-bold font-mono text-blue-400">
-                      {selectedTrip.durationMinutes} <span className="text-xs text-slate-500">min</span>
-                    </div>
-                  </div>
-                  <div className="bg-slate-900 border border-slate-800 p-2.5 rounded-xl">
-                    <div className="text-[10px] text-slate-400 uppercase font-semibold">Average Speed</div>
-                    <div className="text-lg font-bold font-mono text-amber-400">
-                      {selectedTrip.avgSpeedKmH} <span className="text-xs text-slate-500">km/h</span>
-                    </div>
-                  </div>
-                  <div className="bg-slate-900 border border-slate-800 p-2.5 rounded-xl">
-                    <div className="text-[10px] text-slate-400 uppercase font-semibold">Top Speed</div>
-                    <div className="text-lg font-bold font-mono text-rose-400">
-                      {selectedTrip.maxSpeedKmH} <span className="text-xs text-slate-500">km/h</span>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Leaflet Map Replaying Trip Path */}
-                <div className="flex-1 min-h-[280px] rounded-2xl overflow-hidden border border-slate-800 relative shadow-inner">
-                  <MapComponent
-                    routePath={selectedTrip.path}
-                    focusLocation={
-                      selectedTrip.path.length > 0
-                        ? { lat: selectedTrip.path[0][0], lng: selectedTrip.path[0][1] }
-                        : null
-                    }
-                    height="100%"
-                  />
-                  <div className="absolute bottom-3 right-3 z-[400] bg-slate-900/90 backdrop-blur-md px-3 py-1.5 rounded-lg border border-slate-700 text-[11px] font-medium text-slate-300">
-                    Showing {selectedTrip.path.length} GPS Breadcrumbs
-                  </div>
-                </div>
-              </div>
-            ) : (
-              <div className="flex-1 flex items-center justify-center text-slate-500 text-xs">
-                Select a trip on the left to view route playback on OpenStreetMap.
-              </div>
-            )}
-          </div>
+              );
+            })
+          )}
         </div>
       </div>
     </div>
