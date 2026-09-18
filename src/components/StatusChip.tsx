@@ -9,7 +9,8 @@ export function formatStatus(status: string): { label: string; className: string
   const s = status ? status.toUpperCase() : '';
   switch (s) {
     case 'DELIVERED':
-      return { label: 'Delivered', className: 'bg-[#22c55e]/15 text-[#22c55e]' };
+    case 'COMPLETED':
+      return { label: 'Completed', className: 'bg-[#22c55e]/15 text-[#22c55e]' };
     case 'CANCELLED':
       return { label: 'Cancelled', className: 'bg-[#ef4444]/15 text-[#ef4444]' };
     case 'IN_TRANSIT':
@@ -22,6 +23,7 @@ export function formatStatus(status: string): { label: string; className: string
     case 'DRIVER_EN_ROUTE_PICKUP':
       return { label: 'To Pickup', className: 'bg-[#3b82f6]/15 text-[#3b82f6]' };
     case 'ARRIVED_PICKUP':
+    case 'AT_PICKUP':
       return { label: 'At Pickup', className: 'bg-[#f59e0b]/15 text-[#f59e0b]' };
     case 'ARRIVED_DESTINATION':
       return { label: 'At Destination', className: 'bg-[#f59e0b]/15 text-[#f59e0b]' };

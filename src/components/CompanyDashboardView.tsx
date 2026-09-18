@@ -27,17 +27,39 @@ export const CompanyDashboardView: React.FC<CompanyDashboardViewProps> = ({
   const [isLeadDriverCheck, setIsLeadDriverCheck] = useState(false);
   const [copiedCode, setCopiedCode] = useState(false);
 
-  // Performance calculations
+  // Real calculated performance metrics
   const totalDrivers = drivers.length;
   const activeNow = drivers.filter(
     (d) =>
-      d.status === 'busy' ||
-      d.status === 'EN_ROUTE_DELIVERY' ||
       d.status === 'AVAILABLE' ||
       d.status === 'available' ||
-      d.currentLocation.speed > 0
+      d.status === 'ASSIGNED' ||
+      d.status === 'EN_ROUTE_PICKUP' ||
+      d.status === 'AT_PICKUP' ||
+      d.status === 'IN_TRANSIT' ||
+      d.status === 'busy' ||
+      d.status === 'EN_ROUTE_DELIVERY' ||
+      (d.currentLocation && d.currentLocation.speed > 0)
   ).length;
-  const ordersToday = orders.length;
+
+  const activeTrips = orders.filter(
+    (o) => o.status !== 'DELIVERED' && o.status !== 'CANCELLED' && o.status !== 'COMPLETED'
+  );
+  const activeTripsCount = activeTrips.length;
+
+  // Real ETA calculation across active trips
+  const activeWithEta = activeTrips.filter(
+    (o) => (o.estimatedMinutes && o.estimatedMinutes > 0) || (o.liveEtaMinutes && o.liveEtaMinutes > 0)
+  );
+  const avgEtaMinutes =
+    activeWithEta.length > 0
+      ? Math.round(
+          activeWithEta.reduce(
+            (acc, o) => acc + (o.liveEtaMinutes || o.estimatedMinutes || 0),
+            0
+          ) / activeWithEta.length
+        )
+      : null;
 
   // Format relative time helper
   const getTimeAgo = (timestamp?: number) => {
@@ -117,7 +139,7 @@ export const CompanyDashboardView: React.FC<CompanyDashboardViewProps> = ({
         </div>
       </div>
 
-      {/* Summary Stat Row at Top (4 Cards) */}
+      {/* Summary Stat Row at Top (4 Cards with 100% Real Calculated Metrics) */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         <div className="bg-[#13131a] border border-white/[0.06] rounded-xl p-4">
           <div className="text-xs text-[#94a3b8]">Total Drivers</div>
@@ -125,27 +147,29 @@ export const CompanyDashboardView: React.FC<CompanyDashboardViewProps> = ({
         </div>
 
         <div className="bg-[#13131a] border border-white/[0.06] rounded-xl p-4">
-          <div className="text-xs text-[#94a3b8]">Active Now</div>
+          <div className="text-xs text-[#94a3b8]">Active Drivers</div>
           <div className="text-2xl font-bold text-white mt-1 tabular-nums">{activeNow}</div>
         </div>
 
         <div className="bg-[#13131a] border border-white/[0.06] rounded-xl p-4">
-          <div className="text-xs text-[#94a3b8]">Orders Today</div>
-          <div className="text-2xl font-bold text-white mt-1 tabular-nums">{ordersToday}</div>
+          <div className="text-xs text-[#94a3b8]">Active Dorm Trips</div>
+          <div className="text-2xl font-bold text-white mt-1 tabular-nums">{activeTripsCount}</div>
         </div>
 
         <div className="bg-[#13131a] border border-white/[0.06] rounded-xl p-4">
-          <div className="text-xs text-[#94a3b8]">Avg ETA</div>
-          <div className="text-2xl font-bold text-white mt-1 tabular-nums">14 min</div>
+          <div className="text-xs text-[#94a3b8]">Avg Road ETA</div>
+          <div className="text-2xl font-bold text-white mt-1 tabular-nums">
+            {avgEtaMinutes !== null ? `${avgEtaMinutes} min` : '—'}
+          </div>
         </div>
       </div>
 
-      {/* Two Columns: Left = Driver List, Right = Recent Orders List */}
+      {/* Two Columns: Left = Driver List, Right = Recent Trips List */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
         {/* Left Column: Driver List */}
         <div className="bg-[#13131a] border border-white/[0.06] rounded-xl p-4 sm:p-5 flex flex-col">
           <div className="flex items-center justify-between mb-4">
-            <h2 className="text-sm font-bold text-white">Drivers</h2>
+            <h2 className="text-sm font-bold text-white">Fleet Drivers</h2>
             <span className="text-xs text-[#4a5568] tabular-nums font-mono">
               {drivers.length} registered
             </span>
@@ -156,7 +180,10 @@ export const CompanyDashboardView: React.FC<CompanyDashboardViewProps> = ({
               const isAvailable =
                 driver.status === 'AVAILABLE' || driver.status === 'available';
               const isBusy =
-                driver.status === 'busy' || driver.status === 'EN_ROUTE_DELIVERY';
+                driver.status === 'busy' ||
+                driver.status === 'EN_ROUTE_DELIVERY' ||
+                driver.status === 'EN_ROUTE_PICKUP' ||
+                driver.status === 'IN_TRANSIT';
 
               return (
                 <div
@@ -207,7 +234,7 @@ export const CompanyDashboardView: React.FC<CompanyDashboardViewProps> = ({
                     {!driver.isLeadDriver && (
                       <button
                         onClick={() => onSetLeadDriver(driver.id)}
-                        className="text-[10px] text-[#3b82f6] hover:underline mt-0.5"
+                        className="text-[10px] text-[#3b82f6] hover:underline mt-0.5 cursor-pointer"
                       >
                         Make Lead
                       </button>
@@ -219,10 +246,10 @@ export const CompanyDashboardView: React.FC<CompanyDashboardViewProps> = ({
           </div>
         </div>
 
-        {/* Right Column: Recent Orders List */}
+        {/* Right Column: Recent Dorm Trips List */}
         <div className="bg-[#13131a] border border-white/[0.06] rounded-xl p-4 sm:p-5 flex flex-col">
           <div className="flex items-center justify-between mb-4">
-            <h2 className="text-sm font-bold text-white">Recent Orders</h2>
+            <h2 className="text-sm font-bold text-white">Dorm Shuttle Trips</h2>
             <span className="text-xs text-[#4a5568] tabular-nums font-mono">
               {orders.length} total
             </span>
@@ -231,11 +258,12 @@ export const CompanyDashboardView: React.FC<CompanyDashboardViewProps> = ({
           <div className="flex flex-col gap-2 max-h-[460px] overflow-y-auto pr-1">
             {orders.length === 0 ? (
               <div className="p-6 text-center text-xs text-[#4a5568]">
-                No orders created yet.
+                No shuttle trips created yet.
               </div>
             ) : (
               orders.map((order) => {
                 const assigned = drivers.find((d) => d.id === order.assignedDriverId);
+                const trackingLink = `${window.location.origin}/?track=${order.trackingCode || order.id}`;
 
                 return (
                   <div
@@ -245,22 +273,32 @@ export const CompanyDashboardView: React.FC<CompanyDashboardViewProps> = ({
                     <div className="min-w-0">
                       <div className="flex items-center gap-2">
                         <span className="font-mono text-xs text-[#94a3b8]">
-                          {order.trackingCode || order.id}
+                          {order.trackingCode || order.id.slice(-6)}
                         </span>
                         <span className="text-xs font-medium text-white truncate">
-                          {order.customerName}
+                          {order.studentName || order.customerName}
                         </span>
                       </div>
                       <div className="text-[11px] text-[#4a5568] truncate mt-0.5">
-                        Driver: {assigned ? assigned.name : 'Unassigned'}
+                        {order.pickupAddress} → {order.dropoffAddress}
+                      </div>
+                      <div className="text-[10px] text-[#94a3b8] mt-0.5">
+                        Taxi: {assigned ? `${assigned.name} (${assigned.vehicleModel})` : 'Unassigned'}
                       </div>
                     </div>
 
-                    <div className="flex flex-col items-end gap-1 shrink-0">
+                    <div className="flex flex-col items-end gap-1.5 shrink-0">
                       <StatusChip status={order.status} />
-                      <span className="text-[10px] text-[#4a5568]">
-                        {getTimeAgo(order.createdAt)}
-                      </span>
+                      <button
+                        onClick={() => {
+                          navigator.clipboard.writeText(trackingLink);
+                        }}
+                        title="Copy student tracking link"
+                        className="text-[10px] text-[#3b82f6] hover:text-blue-400 flex items-center gap-1 cursor-pointer transition-colors"
+                      >
+                        <Copy className="w-3 h-3" />
+                        <span>Copy Link</span>
+                      </button>
                     </div>
                   </div>
                 );

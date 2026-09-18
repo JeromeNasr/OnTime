@@ -14,7 +14,7 @@ import {
 import { Driver, Order, Network, TripLog } from './types';
 import { DriverPhoneView } from './components/DriverPhoneView';
 import { LeadDriverDispatchView } from './components/LeadDriverDispatchView';
-import { CustomerTrackingView } from './components/CustomerTrackingView';
+import { StudentTrackingView } from './components/StudentTrackingView';
 import { CompanyDashboardView } from './components/CompanyDashboardView';
 import { NetworkSwitcherModal } from './components/NetworkSwitcherModal';
 import { TripHistoryModal } from './components/TripHistoryModal';
@@ -157,49 +157,60 @@ export default function App() {
     };
 
     // Order events
-    const onOrderCreated = (newOrder: Order) => {
+    const onTripCreated = (newTrip: Order) => {
       setOrders((prev) => {
-        if (prev.some((o) => o.id === newOrder.id)) return prev;
-        return [newOrder, ...prev];
+        if (prev.some((o) => o.id === newTrip.id)) return prev;
+        return [newTrip, ...prev];
       });
     };
 
-    const onOrderAssigned = (data: { order: Order; driverId: string }) => {
+    const onTripAssigned = (data: { order?: Order; trip?: Order; driverId: string }) => {
+      const trip = data.trip || data.order;
+      if (!trip) return;
       setOrders((prev) =>
-        prev.map((o) => (o.id === data.order.id ? data.order : o))
+        prev.map((o) => (o.id === trip.id ? trip : o))
       );
     };
 
-    const onOrderStatusChanged = (data: { orderId: string; status: Order['status'] }) => {
+    const onTripStatusChanged = (data: { orderId?: string; tripId?: string; status: Order['status'] }) => {
+      const targetId = data.tripId || data.orderId;
       setOrders((prev) =>
-        prev.map((o) => (o.id === data.orderId ? { ...o, status: data.status } : o))
+        prev.map((o) => (o.id === targetId ? { ...o, status: data.status } : o))
       );
     };
 
-    const onOrderUpdated = (updatedOrder: Order) => {
+    const onTripUpdated = (updatedTrip: Order) => {
       setOrders((prev) =>
-        prev.some((o) => o.id === updatedOrder.id)
-          ? prev.map((o) => (o.id === updatedOrder.id ? updatedOrder : o))
-          : [updatedOrder, ...prev]
+        prev.some((o) => o.id === updatedTrip.id)
+          ? prev.map((o) => (o.id === updatedTrip.id ? updatedTrip : o))
+          : [updatedTrip, ...prev]
       );
     };
 
     socket.on('driver:location', onDriverLocation);
     socket.on('driver:joined', onDriverJoined);
-    socket.on('order:created', onOrderCreated);
-    socket.on('order:assigned', onOrderAssigned);
-    socket.on('order:status_changed', onOrderStatusChanged);
-    socket.on('order:updated', onOrderUpdated);
+    socket.on('trip:created', onTripCreated);
+    socket.on('order:created', onTripCreated);
+    socket.on('trip:assigned', onTripAssigned);
+    socket.on('order:assigned', onTripAssigned);
+    socket.on('trip:status_changed', onTripStatusChanged);
+    socket.on('order:status_changed', onTripStatusChanged);
+    socket.on('trip:updated', onTripUpdated);
+    socket.on('order:updated', onTripUpdated);
 
     return () => {
       socket.off('connect', onConnect);
       socket.off('disconnect', onDisconnect);
       socket.off('driver:location', onDriverLocation);
       socket.off('driver:joined', onDriverJoined);
-      socket.off('order:created', onOrderCreated);
-      socket.off('order:assigned', onOrderAssigned);
-      socket.off('order:status_changed', onOrderStatusChanged);
-      socket.off('order:updated', onOrderUpdated);
+      socket.off('trip:created', onTripCreated);
+      socket.off('order:created', onTripCreated);
+      socket.off('trip:assigned', onTripAssigned);
+      socket.off('order:assigned', onTripAssigned);
+      socket.off('trip:status_changed', onTripStatusChanged);
+      socket.off('order:status_changed', onTripStatusChanged);
+      socket.off('trip:updated', onTripUpdated);
+      socket.off('order:updated', onTripUpdated);
     };
   }, [currentNetwork.id, currentNetwork.code, currentDriverId]);
 
@@ -494,10 +505,10 @@ export default function App() {
       <div className="border-b border-white/[0.06] bg-[#0a0a0f] sticky top-[52px] z-30 px-4 sm:px-6">
         <div className="max-w-7xl mx-auto flex items-center gap-8">
           {[
-            { id: 'driver', label: 'Driver', icon: Car },
-            { id: 'lead', label: 'Dispatch', icon: Navigation },
-            { id: 'customer', label: 'Track', icon: MapPin },
-            { id: 'company', label: 'Fleet', icon: LayoutDashboard },
+            { id: 'driver', label: 'Driver Phone', icon: Car },
+            { id: 'lead', label: 'Dispatcher', icon: Navigation },
+            { id: 'customer', label: 'Student Tracking', icon: MapPin },
+            { id: 'company', label: 'Fleet Overview', icon: LayoutDashboard },
           ].map((tab) => {
             const Icon = tab.icon;
             const isActive = activeTab === tab.id;
@@ -580,11 +591,9 @@ export default function App() {
           </div>
         )}
 
-        {/* Tab 3: Customer Live Tracking View */}
+        {/* Tab 3: Student Live Tracking View */}
         {activeTab === 'customer' && (
-          <CustomerTrackingView
-            orders={orders}
-            drivers={drivers}
+          <StudentTrackingView
             initialTrackingCode={initialTrackingCode}
           />
         )}
@@ -616,7 +625,7 @@ export default function App() {
         {[
           { id: 'driver', label: 'Driver', icon: Car },
           { id: 'lead', label: 'Dispatch', icon: Navigation },
-          { id: 'customer', label: 'Track', icon: MapPin },
+          { id: 'customer', label: 'Student', icon: MapPin },
           { id: 'company', label: 'Fleet', icon: LayoutDashboard },
         ].map((item) => {
           const Icon = item.icon;

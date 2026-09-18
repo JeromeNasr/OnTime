@@ -471,13 +471,13 @@ export const DriverPhoneView: React.FC<DriverPhoneViewProps> = ({
         )}
       </div>
 
-      {/* Active Order Card */}
+      {/* Active Trip Card */}
       {activeOrder ? (
         <div className="bg-[#13131a] border border-white/[0.06] rounded-xl p-5 flex flex-col gap-4">
           <div className="flex items-center justify-between">
             <div>
-              <span className="text-[11px] font-mono text-[#4a5568]">#{activeOrder.id}</span>
-              <h3 className="text-sm font-bold text-white mt-0.5">{activeOrder.customerName}</h3>
+              <span className="text-[11px] font-mono text-[#4a5568]">TRIP #{activeOrder.id.slice(-6)}</span>
+              <h3 className="text-sm font-bold text-white mt-0.5">{activeOrder.studentName || activeOrder.customerName}</h3>
             </div>
             <StatusChip status={activeOrder.status} />
           </div>
@@ -490,47 +490,44 @@ export const DriverPhoneView: React.FC<DriverPhoneViewProps> = ({
             {/* Pickup */}
             <div className="relative">
               <div className="absolute -left-6 top-[3px] w-3 h-3 rounded-full bg-[#22c55e] border-2 border-[#13131a]" />
-              <div className="text-[10px] text-[#4a5568] uppercase font-medium">Pickup</div>
+              <div className="text-[10px] text-[#4a5568] uppercase font-medium">Pickup (Dorm)</div>
               <div className="text-slate-200 mt-0.5">{activeOrder.pickupAddress}</div>
             </div>
 
-            {/* Dropoff */}
+            {/* Destination */}
             <div className="relative">
               <div className="absolute -left-6 top-[3px] w-3 h-3 rounded-full bg-[#ef4444] border-2 border-[#13131a]" />
-              <div className="text-[10px] text-[#4a5568] uppercase font-medium">Dropoff</div>
+              <div className="text-[10px] text-[#4a5568] uppercase font-medium">Destination (Campus)</div>
               <div className="text-slate-200 mt-0.5">{activeOrder.dropoffAddress}</div>
             </div>
           </div>
 
-          {/* Contact and Maps quick action links */}
-          <div className="flex items-center gap-2 pt-1 border-t border-white/[0.06]">
-            <a
-              href={`tel:${activeOrder.customerPhone}`}
-              className="flex-1 py-2 bg-[#0a0a0f] hover:bg-[#1a1a24] text-slate-300 text-xs font-medium rounded-lg flex items-center justify-center gap-1.5 border border-white/[0.06] transition-colors"
-            >
-              <PhoneCall className="w-3.5 h-3.5" /> Call Customer
-            </a>
+          {/* Maps Navigation link (No call button - student tracks driver location automatically) */}
+          <div className="pt-1 border-t border-white/[0.06]">
             <a
               href={`https://www.google.com/maps/dir/?api=1&destination=${
-                orderStatusUpper.includes('PICK') ? activeOrder.pickupCoords.lat : activeOrder.dropoffCoords.lat
-              },${orderStatusUpper.includes('PICK') ? activeOrder.pickupCoords.lng : activeOrder.dropoffCoords.lng}`}
+                orderStatusUpper.includes('PICK') || orderStatusUpper === 'ASSIGNED' || orderStatusUpper === 'CREATED'
+                  ? `${activeOrder.pickupCoords.lat},${activeOrder.pickupCoords.lng}`
+                  : `${activeOrder.dropoffCoords.lat},${activeOrder.dropoffCoords.lng}`
+              }`}
               target="_blank"
               rel="noopener noreferrer"
-              className="flex-1 py-2 bg-[#0a0a0f] hover:bg-[#1a1a24] text-slate-300 text-xs font-medium rounded-lg flex items-center justify-center gap-1.5 border border-white/[0.06] transition-colors"
+              className="w-full h-11 bg-[#0a0a0f] hover:bg-[#1a1a24] text-slate-200 text-xs font-medium rounded-lg flex items-center justify-center gap-2 border border-white/[0.06] transition-colors"
             >
-              <ExternalLink className="w-3.5 h-3.5" /> Open Maps
+              <ExternalLink className="w-4 h-4 text-[#3b82f6]" />
+              <span>Navigate in Google Maps ({orderStatusUpper.includes('PICK') || orderStatusUpper === 'ASSIGNED' ? 'To Pickup' : 'To Campus'})</span>
             </a>
           </div>
 
-          {/* Status Action Buttons - Small and clearly labeled */}
-          <div className="flex flex-wrap gap-2 pt-2 border-t border-white/[0.06]">
+          {/* Status Action Buttons - Large touch targets for driver safety */}
+          <div className="flex flex-col gap-2 pt-2 border-t border-white/[0.06]">
             {(orderStatusUpper === 'ASSIGNED' || orderStatusUpper === 'CREATED') && (
               <button
                 id="btn-order-enroute-pickup"
                 onClick={() => onUpdateOrderStatus(activeOrder.id, 'DRIVER_EN_ROUTE_PICKUP')}
-                className="flex-1 py-2 bg-[#3b82f6] hover:bg-blue-600 text-white text-xs font-medium rounded-lg transition-colors"
+                className="w-full h-12 bg-[#3b82f6] hover:bg-blue-600 text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer"
               >
-                En Route to Pickup
+                Depart for Student Pickup
               </button>
             )}
 
@@ -538,19 +535,19 @@ export const DriverPhoneView: React.FC<DriverPhoneViewProps> = ({
               <button
                 id="btn-order-arrived-pickup"
                 onClick={() => onUpdateOrderStatus(activeOrder.id, 'ARRIVED_PICKUP')}
-                className="flex-1 py-2 bg-[#f59e0b] hover:bg-amber-600 text-white text-xs font-medium rounded-lg transition-colors"
+                className="w-full h-12 bg-[#f59e0b] hover:bg-amber-600 text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer"
               >
-                Arrived at Pickup
+                Arrived at Student Dorm
               </button>
             )}
 
-            {(orderStatusUpper === 'ARRIVED_PICKUP' || orderStatusUpper === 'ASSIGNED') && (
+            {(orderStatusUpper === 'ARRIVED_PICKUP' || orderStatusUpper === 'AT_PICKUP') && (
               <button
                 id="btn-order-confirm-pickup"
                 onClick={() => onUpdateOrderStatus(activeOrder.id, 'IN_TRANSIT')}
-                className="flex-1 py-2 bg-[#3b82f6] hover:bg-blue-600 text-white text-xs font-medium rounded-lg transition-colors"
+                className="w-full h-12 bg-[#3b82f6] hover:bg-blue-600 text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer"
               >
-                Start Delivery (In Transit)
+                Student Picked Up • Depart for Campus
               </button>
             )}
 
@@ -558,19 +555,19 @@ export const DriverPhoneView: React.FC<DriverPhoneViewProps> = ({
               <button
                 id="btn-order-delivered"
                 onClick={() => onUpdateOrderStatus(activeOrder.id, 'DELIVERED')}
-                className="flex-1 py-2 bg-[#22c55e] hover:bg-green-600 text-white text-xs font-medium rounded-lg transition-colors"
+                className="w-full h-12 bg-[#22c55e] hover:bg-green-600 text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer"
               >
-                Mark Delivered
+                Arrived at Campus Gate • Complete Trip
               </button>
             )}
           </div>
         </div>
       ) : (
-        <div className="bg-[#13131a] border border-dashed border-white/[0.06] rounded-xl p-6 text-center text-[#4a5568]">
-          <Car className="w-6 h-6 mx-auto mb-2 text-[#4a5568]" />
-          <p className="text-xs text-[#94a3b8]">No Active Order Assigned</p>
-          <p className="text-[11px] text-[#4a5568] mt-0.5">
-            Orders assigned to you from Dispatch will appear here.
+        <div className="bg-[#13131a] border border-dashed border-white/[0.06] rounded-xl p-8 text-center text-[#4a5568]">
+          <Car className="w-7 h-7 mx-auto mb-2 text-[#4a5568]" />
+          <p className="text-xs font-medium text-[#94a3b8]">No Active Trip Assigned</p>
+          <p className="text-[11px] text-[#4a5568] mt-1">
+            Dorm transportation trips dispatched to your taxi will appear here automatically.
           </p>
         </div>
       )}

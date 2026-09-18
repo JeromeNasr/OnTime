@@ -1,4 +1,5 @@
 import { io, Socket } from 'socket.io-client';
+import { getStoredToken } from './api';
 
 let socket: Socket | null = null;
 
@@ -25,15 +26,26 @@ export function getSocket(): Socket {
 
 export function joinCompanyRoom(companyId: string): void {
   const s = getSocket();
-  s.emit('join:company', companyId);
+  const token = getStoredToken();
+  s.emit('join:company', { companyId, token: token || undefined });
+}
+
+export function joinTripRoom(trackingTokenOrId: string): void {
+  const s = getSocket();
+  const token = getStoredToken();
+  s.emit('join:trip', {
+    trackingToken: trackingTokenOrId,
+    tripId: trackingTokenOrId,
+    token: token || undefined,
+  });
 }
 
 export function joinOrderRoom(orderId: string): void {
-  const s = getSocket();
-  s.emit('join:order', orderId);
+  joinTripRoom(orderId);
 }
 
 export function joinDriverRoom(driverId: string): void {
   const s = getSocket();
-  s.emit('join:driver', driverId);
+  const token = getStoredToken();
+  s.emit('join:driver', { driverId, token: token || undefined });
 }

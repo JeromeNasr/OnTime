@@ -7,10 +7,8 @@ export type DriverStatus =
   | 'ASSIGNED'
   | 'EN_ROUTE_PICKUP'
   | 'AT_PICKUP'
-  | 'ARRIVED_PICKUP' // compatibility
   | 'IN_TRANSIT'
   | 'AT_DESTINATION'
-  | 'EN_ROUTE_DELIVERY' // compatibility
   | 'PAUSED';
 
 export type TripStatus =
@@ -18,18 +16,13 @@ export type TripStatus =
   | 'ASSIGNED'
   | 'DRIVER_ACCEPTED'
   | 'EN_ROUTE_PICKUP'
-  | 'DRIVER_EN_ROUTE_PICKUP' // compatibility
   | 'AT_PICKUP'
-  | 'ARRIVED_PICKUP' // compatibility
   | 'IN_TRANSIT'
-  | 'PICKED_UP' // compatibility
   | 'AT_DESTINATION'
-  | 'ARRIVED_DESTINATION' // compatibility
   | 'COMPLETED'
-  | 'DELIVERED' // compatibility
   | 'CANCELLED';
 
-// Backwards compatibility alias
+// Compatibility alias for API and internal migrations
 export type OrderStatus = TripStatus;
 
 export interface User {
@@ -44,7 +37,7 @@ export interface User {
 
 export interface Company {
   id: string;
-  code: string; // human-friendly short code e.g. NORTH-77
+  code: string; // human-friendly short code e.g. JBEIL-01
   name: string;
   ownerName: string;
   ownerEmail: string;
@@ -102,6 +95,7 @@ export interface Driver {
   status: DriverStatus;
   currentLocation: DriverLocation;
   currentOrderId?: string;
+  currentTripId?: string;
   totalTrips: number;
   rating: number;
   lastHeartbeat?: number;
@@ -115,32 +109,31 @@ export interface Driver {
   };
 }
 
-export interface OrderStatusHistoryItem {
-  status: OrderStatus;
+export interface TripStatusHistoryItem {
+  status: TripStatus;
   timestamp: number;
   note?: string;
   updatedBy?: string;
   location?: { lat: number; lng: number };
 }
 
+export type OrderStatusHistoryItem = TripStatusHistoryItem;
+
 export interface Trip {
   id: string;
-  companyId?: string;
+  companyId: string;
   networkCode?: string;
   driverId?: string;
   vehicleId?: string;
   trackingCode: string;
-  trackingToken?: string; // secure non-guessable token
+  trackingToken: string; // Cryptographic 256-bit unguessable credential
+  trackingTokenExpiresAt?: number;
   studentName: string;
   studentPhone?: string;
-  // backwards compatibility
-  customerName: string;
-  customerPhone: string;
   pickupAddress: string;
   pickupCoords: { lat: number; lng: number };
   dropoffAddress: string;
   dropoffCoords: { lat: number; lng: number };
-  packageInfo?: string;
   priority?: 'normal' | 'high' | 'urgent';
   assignedDriverId?: string;
   status: TripStatus;
@@ -152,10 +145,17 @@ export interface Trip {
   estimatedMinutes?: number;
   roadDistanceKm?: number;
   routeGeometry?: [number, number][]; // actual road polyline from OSRM
-  statusHistory?: OrderStatusHistoryItem[];
+  statusHistory?: TripStatusHistoryItem[];
   notes?: string;
+
+  // Compatibility fields for legacy references
+  customerName?: string;
+  customerPhone?: string;
+  packageInfo?: string;
+  liveEtaMinutes?: number;
 }
 
+// Canonical model is Trip; Order is kept only as type alias
 export type Order = Trip;
 
 export type StudentTrackingState =
@@ -188,8 +188,8 @@ export interface TripLog {
   companyId?: string;
   networkCode?: string;
   vehicleId?: string;
-  orderId?: string;
   tripId?: string;
+  orderId?: string;
   startTime: number;
   endTime: number;
   startAddress: string;
@@ -217,11 +217,17 @@ export interface Invite {
   revoked?: boolean;
 }
 
+/**
+ * Public Student Tracking DTO (Privacy-hardened)
+ * Exposes ONLY what the student needs to view their taxi.
+ * NO database IDs, company IDs, driver phone, private driver info, or internal notes.
+ */
 export interface PublicTrackingResponse {
-  tripStatus: TripStatus;
+  status: TripStatus;
   trackingState: StudentTrackingState;
   trackingCode: string;
-  studentName: string;
+  companyName?: string;
+  studentName?: string;
   pickup: {
     address: string;
     lat: number;
@@ -232,27 +238,34 @@ export interface PublicTrackingResponse {
     lat: number;
     lng: number;
   };
-  driver: {
-    name: string; // First name only
-    vehicleModel: string;
-    plateNumber: string;
-    currentLocation?: {
-      lat: number;
-      lng: number;
-      speed: number;
-      heading: number;
-      accuracy: number;
-      timestamp: number;
-    };
-    rating?: number;
+  taxiLocation: {
+    lat: number;
+    lng: number;
+    speed: number;
+    heading: number;
+    timestamp: number;
   } | null;
-  roadRoute: [number, number][];
   etaMinutes: number | null;
   distanceKm: number | null;
+  lastUpdated: number;
   lastUpdatedSecondsAgo: number;
   isStale: boolean;
-  // Backwards compatibility fields for existing UI components
-  order: {
+  gpsFreshness: 'FRESH' | 'STALE' | 'OFFLINE';
+  roadRoute: [number, number][];
+  vehicle: {
+    makeModel: string;
+    plateNumber: string;
+    type?: string;
+  } | null;
+  driver?: {
+    name: string; // First name only
+    vehicleModel?: string;
+    plateNumber?: string;
+  } | null;
+
+  // Backwards compatibility shim for existing consumers during transition
+  tripStatus?: TripStatus;
+  order?: {
     id: string;
     trackingCode: string;
     customerName: string;
@@ -260,13 +273,13 @@ export interface PublicTrackingResponse {
     pickupCoords: { lat: number; lng: number };
     dropoffAddress: string;
     dropoffCoords: { lat: number; lng: number };
-    status: OrderStatus;
+    status: TripStatus;
     packageInfo: string;
     updatedAt: number;
   };
-  liveEtaMinutes: number;
-  trafficCondition: 'Normal' | 'Moderate' | 'Heavy';
-  trafficSource: string;
+  liveEtaMinutes?: number;
+  trafficCondition?: string;
+  trafficSource?: string;
 }
 
 export interface NorthLebanonLocation {

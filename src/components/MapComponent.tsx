@@ -1,13 +1,15 @@
 import React, { useEffect, useRef } from 'react';
 import L from 'leaflet';
-import { Driver, Order } from '../types';
+import { Driver, Trip, Order } from '../types';
 import { JBEIL_BOUNDS } from '../data/jbeilData';
 
 interface MapComponentProps {
   drivers?: Driver[];
   selectedDriverId?: string;
   onSelectDriver?: (driver: Driver) => void;
+  trips?: Trip[];
   orders?: Order[];
+  activeTrip?: Trip | null;
   activeOrder?: Order | null;
   focusLocation?: { lat: number; lng: number } | null;
   followDriver?: boolean;
@@ -22,7 +24,9 @@ export const MapComponent: React.FC<MapComponentProps> = ({
   drivers = [],
   selectedDriverId,
   onSelectDriver,
+  trips,
   orders = [],
+  activeTrip,
   activeOrder,
   focusLocation,
   followDriver = false,
@@ -37,7 +41,10 @@ export const MapComponent: React.FC<MapComponentProps> = ({
   const markersLayerRef = useRef<L.LayerGroup | null>(null);
   const routeLayerRef = useRef<L.Polyline | null>(null);
 
-  // Initialize Map
+  const displayedTrips = trips || orders || [];
+  const currentActiveTrip = activeTrip || activeOrder;
+
+  // Initialize Map & ResizeObserver
   useEffect(() => {
     if (!mapContainerRef.current || mapInstanceRef.current) return;
 
@@ -48,25 +55,30 @@ export const MapComponent: React.FC<MapComponentProps> = ({
       attributionControl: true,
     });
 
-    // Clean OpenStreetMap tiles
+    // OpenStreetMap tiles
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 19,
-      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
     }).addTo(map);
 
-    // Zoom control at bottom right for better mobile ergonomics
     L.control.zoom({ position: 'bottomright' }).addTo(map);
 
     const markersGroup = L.layerGroup().addTo(map);
     markersLayerRef.current = markersGroup;
     mapInstanceRef.current = map;
 
+    // ResizeObserver to handle container layout changes
+    const ro = new ResizeObserver(() => {
+      map.invalidateSize();
+    });
+    ro.observe(mapContainerRef.current);
+
     if (showNorthHubs) {
       const hubs = [
         { name: 'LAU Byblos Campus', lat: 34.1238, lng: 35.6698 },
-        { name: 'Blat Campus Crest Dorms', lat: 34.1215, lng: 35.6630 },
+        { name: 'Blat Campus Crest Dorms', lat: 34.1215, lng: 35.663 },
         { name: 'Mastita Student Village', lat: 34.1165, lng: 35.6558 },
-        { name: 'Jbeil Voie 13 / Highway', lat: 34.1265, lng: 35.6520 },
+        { name: 'Jbeil Voie 13 / Highway', lat: 34.1265, lng: 35.652 },
         { name: 'Jbeil Old Souk & Port', lat: 34.1215, lng: 35.6455 },
       ];
 
@@ -85,6 +97,7 @@ export const MapComponent: React.FC<MapComponentProps> = ({
     }
 
     return () => {
+      ro.disconnect();
       map.remove();
       mapInstanceRef.current = null;
     };
@@ -98,7 +111,7 @@ export const MapComponent: React.FC<MapComponentProps> = ({
 
     layer.clearLayers();
 
-    // 1. Draw Route Polyline if provided (e.g. from breadcrumbs or pickup to dropoff)
+    // 1. Draw Road Polyline (OSRM or coordinates)
     if (routeLayerRef.current) {
       routeLayerRef.current.remove();
       routeLayerRef.current = null;
@@ -113,27 +126,25 @@ export const MapComponent: React.FC<MapComponentProps> = ({
         lineJoin: 'round',
       }).addTo(map);
 
-      // Auto fit bounds to route on initial load if requested
       try {
         const bounds = L.latLngBounds(routePath.map((p) => [p[0], p[1]]));
         if (bounds.isValid() && !followDriver) {
           map.fitBounds(bounds, { padding: [40, 40], maxZoom: 15 });
         }
-      } catch (e) {
+      } catch {
         // ignore bounds fit error
       }
-    } else if (activeOrder && activeOrder.pickupCoords && activeOrder.dropoffCoords) {
-      // Direct route line between pickup and dropoff
+    } else if (currentActiveTrip && currentActiveTrip.pickupCoords && currentActiveTrip.dropoffCoords) {
       const waypoints: [number, number][] = [
-        [activeOrder.pickupCoords.lat, activeOrder.pickupCoords.lng],
+        [currentActiveTrip.pickupCoords.lat, currentActiveTrip.pickupCoords.lng],
       ];
-      if (activeOrder.assignedDriverId) {
-        const assignedDriver = drivers.find((d) => d.id === activeOrder.assignedDriverId);
+      if (currentActiveTrip.assignedDriverId) {
+        const assignedDriver = drivers.find((d) => d.id === currentActiveTrip.assignedDriverId);
         if (assignedDriver) {
           waypoints.unshift([assignedDriver.currentLocation.lat, assignedDriver.currentLocation.lng]);
         }
       }
-      waypoints.push([activeOrder.dropoffCoords.lat, activeOrder.dropoffCoords.lng]);
+      waypoints.push([currentActiveTrip.dropoffCoords.lat, currentActiveTrip.dropoffCoords.lng]);
 
       routeLayerRef.current = L.polyline(waypoints, {
         color: '#3b82f6',
@@ -143,12 +154,11 @@ export const MapComponent: React.FC<MapComponentProps> = ({
       }).addTo(map);
     }
 
-    // 2. Render Drivers
+    // 2. Render Fleet Drivers / Taxis
     drivers.forEach((driver) => {
       const isSelected = driver.id === selectedDriverId;
       const speedDisplay = Math.round(driver.currentLocation.speed);
 
-      // Small clean arrow/direction indicator in blue (#3b82f6)
       const markerHtml = `
         <div class="relative flex flex-col items-center cursor-pointer select-none">
           <div class="w-7 h-7 rounded-full bg-[#3b82f6] border ${
@@ -187,14 +197,12 @@ export const MapComponent: React.FC<MapComponentProps> = ({
           </div>
           <div class="mt-1 text-slate-400">${driver.vehicleModel} • <span class="font-mono text-white">${driver.plateNumber}</span></div>
           <div class="mt-1 font-medium text-slate-300">Speed: ${Math.round(driver.currentLocation.speed)} km/h • Status: ${driver.status}</div>
-          <div class="mt-0.5 text-slate-500">Phone: ${driver.phone}</div>
         </div>
       `);
     });
 
-    // 3. Render Orders (Pickup & Dropoff)
-    orders.forEach((order) => {
-      // Pickup Pin: small clean green dot
+    // 3. Render Trips (Pickup & Dropoff)
+    displayedTrips.forEach((trip) => {
       const pickupHtml = `
         <div class="flex flex-col items-center select-none">
           <div class="w-3.5 h-3.5 rounded-full bg-[#22c55e] border-2 border-white shadow"></div>
@@ -207,21 +215,20 @@ export const MapComponent: React.FC<MapComponentProps> = ({
         iconSize: [40, 30],
         iconAnchor: [20, 7],
       });
-      L.marker([order.pickupCoords.lat, order.pickupCoords.lng], { icon: pickupIcon })
+      L.marker([trip.pickupCoords.lat, trip.pickupCoords.lng], { icon: pickupIcon })
         .addTo(layer)
         .bindPopup(`
           <div class="text-[#94a3b8] text-xs">
-            <div class="text-[10px] font-semibold text-[#22c55e] uppercase">Pickup</div>
-            <div class="text-sm font-medium text-white mt-0.5">${order.pickupAddress}</div>
-            <div class="text-slate-400 mt-1">Customer: ${order.customerName} (${order.customerPhone})</div>
+            <div class="text-[10px] font-semibold text-[#22c55e] uppercase">Dorm Pickup</div>
+            <div class="text-sm font-medium text-white mt-0.5">${trip.pickupAddress}</div>
+            <div class="text-slate-400 mt-1">Student: ${trip.studentName || trip.customerName || 'Student'}</div>
           </div>
         `);
 
-      // Dropoff Pin: small clean red dot
       const dropoffHtml = `
         <div class="flex flex-col items-center select-none">
           <div class="w-3.5 h-3.5 rounded-full bg-[#ef4444] border-2 border-white shadow"></div>
-          <span class="mt-0.5 px-1 py-0.2 bg-[#13131a] text-[9px] text-[#ef4444] font-medium rounded border border-white/[0.08] whitespace-nowrap">Dropoff</span>
+          <span class="mt-0.5 px-1 py-0.2 bg-[#13131a] text-[9px] text-[#ef4444] font-medium rounded border border-white/[0.08] whitespace-nowrap">Campus</span>
         </div>
       `;
       const dropoffIcon = L.divIcon({
@@ -230,13 +237,12 @@ export const MapComponent: React.FC<MapComponentProps> = ({
         iconSize: [40, 30],
         iconAnchor: [20, 7],
       });
-      L.marker([order.dropoffCoords.lat, order.dropoffCoords.lng], { icon: dropoffIcon })
+      L.marker([trip.dropoffCoords.lat, trip.dropoffCoords.lng], { icon: dropoffIcon })
         .addTo(layer)
         .bindPopup(`
           <div class="text-[#94a3b8] text-xs">
-            <div class="text-[10px] font-semibold text-[#ef4444] uppercase">Destination</div>
-            <div class="text-sm font-medium text-white mt-0.5">${order.dropoffAddress}</div>
-            <div class="text-slate-400 mt-1">Package: ${order.packageInfo}</div>
+            <div class="text-[10px] font-semibold text-[#ef4444] uppercase">Campus Destination</div>
+            <div class="text-sm font-medium text-white mt-0.5">${trip.dropoffAddress}</div>
           </div>
         `);
     });
@@ -269,7 +275,7 @@ export const MapComponent: React.FC<MapComponentProps> = ({
     } else if (focusLocation) {
       map.panTo([focusLocation.lat, focusLocation.lng], { animate: true });
     }
-  }, [drivers, selectedDriverId, orders, activeOrder, focusLocation, followDriver, userPosition, routePath]);
+  }, [drivers, selectedDriverId, displayedTrips, currentActiveTrip, focusLocation, followDriver, userPosition, routePath]);
 
   return (
     <div className={`relative w-full overflow-hidden ${className}`} style={{ height }}>
@@ -279,7 +285,7 @@ export const MapComponent: React.FC<MapComponentProps> = ({
       <div className="absolute top-3 left-3 z-[400] pointer-events-none">
         <div className="bg-[#13131a]/85 backdrop-blur-xs px-2.5 py-1 rounded-md text-[11px] text-[#94a3b8] border border-white/[0.06] flex items-center gap-1.5 shadow-sm">
           <span className="w-1.5 h-1.5 rounded-full bg-[#22c55e]"></span>
-          <span>Jbeil (Byblos) Grid</span>
+          <span>Byblos Dorm Grid</span>
         </div>
       </div>
     </div>

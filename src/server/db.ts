@@ -12,9 +12,39 @@ import {
   TripPoint,
   Invite,
   OrderStatus,
+  TripStatus,
   OrderStatusHistoryItem,
   UserRole,
 } from '../types';
+
+export const VALID_TRIP_TRANSITIONS: Record<string, string[]> = {
+  CREATED: ['ASSIGNED', 'CANCELLED'],
+  ASSIGNED: ['DRIVER_ACCEPTED', 'EN_ROUTE_PICKUP', 'CANCELLED', 'CREATED'],
+  DRIVER_ACCEPTED: ['EN_ROUTE_PICKUP', 'CANCELLED'],
+  EN_ROUTE_PICKUP: ['AT_PICKUP', 'CANCELLED'],
+  AT_PICKUP: ['IN_TRANSIT', 'CANCELLED'],
+  IN_TRANSIT: ['AT_DESTINATION', 'COMPLETED', 'CANCELLED'],
+  AT_DESTINATION: ['COMPLETED', 'CANCELLED'],
+  COMPLETED: [],
+  CANCELLED: [],
+};
+
+export function toCanonicalTripStatus(status: string): TripStatus {
+  const s = (status || '').toUpperCase().trim();
+  if (s === 'DRIVER_EN_ROUTE_PICKUP') return 'EN_ROUTE_PICKUP';
+  if (s === 'ARRIVED_PICKUP') return 'AT_PICKUP';
+  if (s === 'PICKED_UP') return 'IN_TRANSIT';
+  if (s === 'ARRIVED_DESTINATION') return 'AT_DESTINATION';
+  if (s === 'DELIVERED') return 'COMPLETED';
+  return s as TripStatus;
+}
+
+export function getGpsFreshness(timestamp: number): 'FRESH' | 'STALE' | 'OFFLINE' {
+  const ageSec = (Date.now() - timestamp) / 1000;
+  if (ageSec < 25) return 'FRESH';
+  if (ageSec <= 120) return 'STALE';
+  return 'OFFLINE';
+}
 
 export interface AuditLog {
   id: string;
@@ -930,16 +960,16 @@ export const db = {
     roadDistanceKm?: number;
     routeGeometry?: [number, number][];
   }): Order {
-    const id = `ORD-TRIP-${Math.floor(100 + Math.random() * 899)}`;
+    const id = `trip-${crypto.randomUUID().slice(0, 12)}`;
     const comp = dbState.companies[orderData.companyId];
-    const trackingCode = `TRK-${Math.floor(1000 + Math.random() * 9000)}`;
+    const trackingCode = `TRK-${crypto.randomInt(1000, 9999)}`;
     const trackingToken = crypto.randomBytes(24).toString('hex');
     const sName = orderData.studentName || orderData.customerName || 'Student';
     const sPhone = orderData.studentPhone || orderData.customerPhone || '';
     const now = Date.now();
     const tokenExpiresAt = now + 86400000 * 2; // 48 hour token lifetime
 
-    const initialStatus: OrderStatus = orderData.assignedDriverId ? 'ASSIGNED' : 'CREATED';
+    const initialStatus: TripStatus = orderData.assignedDriverId ? 'ASSIGNED' : 'CREATED';
 
     const order: Order = {
       id,
@@ -998,14 +1028,22 @@ export const db = {
     return order;
   },
 
-  assignOrder(orderId: string, driverId?: string): Order | null {
+  assignOrder(orderId: string, driverId?: string, authorizedCompanyId?: string): Order | { error: string } | null {
     const order = dbState.orders[orderId];
     if (!order) return null;
+
+    if (authorizedCompanyId && order.companyId !== authorizedCompanyId) {
+      return { error: 'Company authorization mismatch: Cannot assign trip belonging to another company.' };
+    }
 
     const now = Date.now();
     if (driverId) {
       const driver = dbState.drivers[driverId];
-      if (!driver) return null;
+      if (!driver) return { error: `Driver with ID ${driverId} not found.` };
+      if (driver.companyId !== order.companyId) {
+        return { error: 'Cannot assign driver from another company to this trip.' };
+      }
+
       order.assignedDriverId = driverId;
       order.status = 'ASSIGNED';
       order.updatedAt = now;
@@ -1033,7 +1071,7 @@ export const db = {
       order.statusHistory.push({
         status: 'CREATED',
         timestamp: now,
-        note: 'Order unassigned to dispatch pool',
+        note: 'Trip unassigned back to dispatch pool',
       });
 
       executeSql(`UPDATE trips SET driver_id = NULL, status = 'CREATED', updated_at = $1 WHERE id = $2;`, [now, orderId]);
@@ -1042,50 +1080,89 @@ export const db = {
     return order;
   },
 
-  updateOrderStatus(orderId: string, status: OrderStatus, note?: string): Order | null {
+  updateOrderStatus(orderId: string, status: OrderStatus, note?: string): Order | { error: string } | null {
     const order = dbState.orders[orderId];
     if (!order) return null;
 
+    const currentCanonical = toCanonicalTripStatus(order.status);
+    const targetCanonical = toCanonicalTripStatus(status);
+
+    // Validate state transition
+    if (currentCanonical !== targetCanonical) {
+      const allowedTargets = VALID_TRIP_TRANSITIONS[currentCanonical] || [];
+      if (!allowedTargets.includes(targetCanonical)) {
+        return {
+          error: `Invalid trip transition from ${currentCanonical} to ${targetCanonical}. Allowed transitions: ${allowedTargets.length ? allowedTargets.join(', ') : 'None (terminal state)'}`,
+        };
+      }
+    }
+
     const now = Date.now();
-    order.status = status;
+    order.status = targetCanonical;
     order.updatedAt = now;
     order.statusHistory = order.statusHistory || [];
     order.statusHistory.push({
-      status,
+      status: targetCanonical,
       timestamp: now,
       note,
     });
 
     if (order.assignedDriverId && dbState.drivers[order.assignedDriverId]) {
       const driver = dbState.drivers[order.assignedDriverId];
-      if (status === 'COMPLETED' || status === 'DELIVERED') {
+      if (targetCanonical === 'COMPLETED' || targetCanonical === 'CANCELLED') {
         driver.status = 'AVAILABLE';
         delete driver.currentOrderId;
-        driver.totalTrips += 1;
-        executeSql(`UPDATE drivers SET status = 'AVAILABLE', current_trip_id = NULL, total_trips = total_trips + 1 WHERE id = $1;`, [driver.id]);
-      } else if (status === 'EN_ROUTE_PICKUP' || status === 'DRIVER_EN_ROUTE_PICKUP') {
+        if (targetCanonical === 'COMPLETED') {
+          driver.totalTrips += 1;
+        }
+        executeSql(`UPDATE drivers SET status = 'AVAILABLE', current_trip_id = NULL, total_trips = total_trips + ${targetCanonical === 'COMPLETED' ? 1 : 0} WHERE id = $1;`, [driver.id]);
+      } else if (targetCanonical === 'EN_ROUTE_PICKUP') {
         driver.status = 'EN_ROUTE_PICKUP';
         executeSql(`UPDATE drivers SET status = 'EN_ROUTE_PICKUP' WHERE id = $1;`, [driver.id]);
-      } else if (status === 'AT_PICKUP' || status === 'ARRIVED_PICKUP') {
+      } else if (targetCanonical === 'AT_PICKUP') {
         driver.status = 'AT_PICKUP';
         executeSql(`UPDATE drivers SET status = 'AT_PICKUP' WHERE id = $1;`, [driver.id]);
-      } else if (status === 'IN_TRANSIT' || status === 'PICKED_UP') {
+      } else if (targetCanonical === 'IN_TRANSIT') {
         driver.status = 'IN_TRANSIT';
         executeSql(`UPDATE drivers SET status = 'IN_TRANSIT' WHERE id = $1;`, [driver.id]);
+      } else if (targetCanonical === 'AT_DESTINATION') {
+        driver.status = 'AT_DESTINATION';
+        executeSql(`UPDATE drivers SET status = 'AT_DESTINATION' WHERE id = $1;`, [driver.id]);
       }
     }
 
-    executeSql(`UPDATE trips SET status = $1, updated_at = $2 WHERE id = $3;`, [status, now, orderId]);
+    executeSql(`UPDATE trips SET status = $1, updated_at = $2 WHERE id = $3;`, [targetCanonical, now, orderId]);
 
     // Record status history entry in Postgres
     const histId = `tsh-${crypto.randomUUID().slice(0, 8)}`;
     executeSql(
       `INSERT INTO trip_status_history (id, trip_id, status, timestamp, note)
        VALUES ($1, $2, $3, $4, $5);`,
-      [histId, orderId, status, now, note || null]
+      [histId, orderId, targetCanonical, now, note || null]
     );
 
     return order;
+  },
+
+  // Canonical Trip aliases
+  createTrip(tripData: Parameters<typeof db.createOrder>[0]): Order {
+    return db.createOrder(tripData);
+  },
+
+  assignTrip(tripId: string, driverId?: string, authorizedCompanyId?: string): Order | { error: string } | null {
+    return db.assignOrder(tripId, driverId, authorizedCompanyId);
+  },
+
+  updateTripStatus(tripId: string, status: TripStatus, note?: string): Order | { error: string } | null {
+    return db.updateOrderStatus(tripId, status, note);
+  },
+
+  getTrip(tripId: string): Order | null {
+    return db.getOrder(tripId);
+  },
+
+  getTripByTracking(codeOrToken: string): Order | null {
+    return db.getOrderByTracking(codeOrToken);
   },
 
   // Trips / History
@@ -1112,7 +1189,7 @@ export const db = {
     const id = `inv-${crypto.randomUUID().slice(0, 8)}`;
     const comp = dbState.companies[companyId];
     const prefix = comp ? comp.code : 'JOIN';
-    const code = `${prefix}-${Math.floor(100 + Math.random() * 899)}`;
+    const code = `${prefix}-${crypto.randomInt(100, 999)}`;
     const token = crypto.randomBytes(16).toString('hex');
     const now = Date.now();
     const expiresAt = now + 86400000 * 30; // 30 days

@@ -1,6 +1,7 @@
 import express from 'express';
 import http from 'http';
 import path from 'path';
+import crypto from 'crypto';
 import { Server as SocketIOServer } from 'socket.io';
 import { createServer as createViteServer } from 'vite';
 import bcrypt from 'bcryptjs';
@@ -32,10 +33,26 @@ async function startServer() {
     })
   );
 
-  // CORS
+  // CORS configuration
+  const configuredOrigins = (process.env.FRONTEND_URL || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  const corsOriginHandler = (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
+    if (!origin) return callback(null, true);
+    if (process.env.NODE_ENV !== 'production' || process.env.DEMO_MODE === 'true') {
+      return callback(null, true);
+    }
+    if (configuredOrigins.length > 0 && configuredOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    return callback(new Error('Origin not allowed by CORS'));
+  };
+
   app.use(
     cors({
-      origin: true,
+      origin: corsOriginHandler,
       credentials: true,
     })
   );
@@ -43,8 +60,9 @@ async function startServer() {
   // Setup Socket.IO with CORS
   const io = new SocketIOServer(httpServer, {
     cors: {
-      origin: '*',
+      origin: corsOriginHandler,
       methods: ['GET', 'POST'],
+      credentials: true,
     },
   });
 
@@ -52,14 +70,20 @@ async function startServer() {
 
   // Socket.IO Room Management with Auth Validation
   io.on('connection', (socket) => {
-    // Client joins company room with optional token verification
+    // Client joins company room with token verification
     socket.on('join:company', (payload: any) => {
       let targetCompanyId = typeof payload === 'string' ? payload : payload?.companyId;
       if (typeof payload === 'object' && payload?.token) {
         const user = verifyToken(payload.token);
         if (user) {
           targetCompanyId = user.companyId;
+        } else if (process.env.NODE_ENV === 'production' && process.env.DEMO_MODE !== 'true') {
+          socket.emit('error', { code: 'UNAUTHORIZED', message: 'Authentication required for company room' });
+          return;
         }
+      } else if (process.env.NODE_ENV === 'production' && process.env.DEMO_MODE !== 'true') {
+        socket.emit('error', { code: 'UNAUTHORIZED', message: 'Authentication required for company room' });
+        return;
       }
       if (targetCompanyId && typeof targetCompanyId === 'string') {
         const comp = db.getCompany(targetCompanyId);
@@ -71,28 +95,75 @@ async function startServer() {
     });
 
     // Student or dispatcher joins specific trip tracking room
-    socket.on('join:order', (orderIdOrToken: string) => {
-      if (orderIdOrToken && typeof orderIdOrToken === 'string') {
-        const order = db.getOrderByTracking(orderIdOrToken);
-        if (order) {
-          socket.join(`order:${order.id}`);
-          if (order.trackingToken) {
-            socket.join(`order:${order.trackingToken}`);
+    const handleJoinTrip = (payload: any) => {
+      const tokenOrCode = typeof payload === 'string' ? payload : (payload?.trackingToken || payload?.tripId || payload?.orderId || payload?.tokenOrCode);
+      const authToken = typeof payload === 'object' ? payload?.token : undefined;
+
+      if (!tokenOrCode || typeof tokenOrCode !== 'string') return;
+
+      const trip = db.getOrderByTracking(tokenOrCode) || db.getOrder(tokenOrCode);
+      if (!trip) {
+        return;
+      }
+
+      // Authorization verification:
+      // 1. Valid cryptographic trackingToken provided (Student tracking link)
+      // 2. Demo mode / dev tracking code match
+      // 3. Authenticated company user from the same company or assigned driver
+      let isAuthorized = false;
+
+      if (trip.trackingToken && tokenOrCode === trip.trackingToken) {
+        isAuthorized = true;
+      } else if (tokenOrCode === trip.trackingCode || tokenOrCode === trip.id) {
+        if (process.env.DEMO_MODE === 'true' || process.env.NODE_ENV !== 'production') {
+          isAuthorized = true;
+        } else if (authToken) {
+          const user = verifyToken(authToken);
+          if (user && (user.companyId === trip.companyId || user.id === trip.assignedDriverId)) {
+            isAuthorized = true;
           }
         }
       }
-    });
+
+      if (isAuthorized) {
+        socket.join(`order:${trip.id}`);
+        socket.join(`trip:${trip.id}`);
+        if (trip.trackingToken) {
+          socket.join(`order:${trip.trackingToken}`);
+          socket.join(`trip:${trip.trackingToken}`);
+        }
+      }
+    };
+
+    socket.on('join:order', handleJoinTrip);
+    socket.on('join:trip', handleJoinTrip);
 
     // Driver joins personal push room with token verification
     socket.on('join:driver', (payload: any) => {
       let driverId = typeof payload === 'string' ? payload : payload?.driverId;
       if (typeof payload === 'object' && payload?.token) {
         const user = verifyToken(payload.token);
-        if (user && user.role === 'DRIVER') {
-          const drv = db.getDriverByUserId(user.id);
-          if (drv) driverId = drv.id;
+        if (user) {
+          if (user.role === 'DRIVER') {
+            const drv = db.getDriverByUserId(user.id);
+            if (drv) driverId = drv.id;
+          } else {
+            // Dispatcher can join driver room within their own company
+            const drv = db.getDriver(driverId);
+            if (!drv || drv.companyId !== user.companyId) {
+              socket.emit('error', { code: 'FORBIDDEN', message: 'Cannot join driver room of another company' });
+              return;
+            }
+          }
+        } else if (process.env.NODE_ENV === 'production' && process.env.DEMO_MODE !== 'true') {
+          socket.emit('error', { code: 'UNAUTHORIZED', message: 'Authentication required for driver room' });
+          return;
         }
+      } else if (process.env.NODE_ENV === 'production' && process.env.DEMO_MODE !== 'true') {
+        socket.emit('error', { code: 'UNAUTHORIZED', message: 'Authentication required for driver room' });
+        return;
       }
+
       if (driverId && typeof driverId === 'string') {
         const drv = db.getDriver(driverId);
         if (drv) {
@@ -281,7 +352,7 @@ async function startServer() {
       return res.status(400).json({ error: 'Company name and owner name required' });
     }
     const comp = db.createCompany({
-      code: `BYB-${Math.floor(100 + Math.random() * 899)}`,
+      code: `BYB-${crypto.randomInt(100, 999)}`,
       name,
       ownerName,
       ownerEmail: ownerEmail || 'owner@ontime.lb',
@@ -295,7 +366,7 @@ async function startServer() {
       return res.status(400).json({ error: 'Company name and owner name required' });
     }
     const comp = db.createCompany({
-      code: `BYB-${Math.floor(100 + Math.random() * 899)}`,
+      code: `BYB-${crypto.randomInt(100, 999)}`,
       name,
       ownerName,
       ownerEmail: ownerEmail || 'owner@ontime.lb',
@@ -314,7 +385,8 @@ async function startServer() {
 
   app.get('/api/drivers', optionalAuth, (req, res) => {
     const { networkCode, companyId } = req.query;
-    const targetCompany = (companyId || networkCode || req.user?.companyId) as string | undefined;
+    // Strict company isolation: authenticated user's company cannot be overridden
+    const targetCompany = req.user?.companyId || ((companyId || networkCode) as string | undefined);
     const drivers = db.listDrivers(targetCompany);
     res.json(drivers);
   });
@@ -353,9 +425,9 @@ async function startServer() {
 
   // ==================== TELEMETRY & REALTIME GPS ====================
 
-  app.post('/api/telemetry', optionalAuth, async (req, res) => {
+  const telemetryHandler = async (req: express.Request, res: express.Response) => {
     const {
-      driverId: reqDriverId,
+      driverId: bodyDriverId,
       lat,
       lng,
       speed,
@@ -364,10 +436,24 @@ async function startServer() {
       batteryLevel,
       networkStatus,
       isSimulated,
+      timestamp: reqTimestamp,
     } = req.body;
 
-    // In production mode, authenticate driver; in demo/compat mode allow driverId
-    const driverId = req.user?.role === 'DRIVER' ? (req.user.id || reqDriverId) : reqDriverId;
+    const targetDriverId = (req.params.id || bodyDriverId) as string | undefined;
+
+    // Driver authorization: driver can ONLY update their own vehicle telemetry
+    let driverId = targetDriverId;
+    if (req.user?.role === 'DRIVER') {
+      const drv = db.getDriverByUserId(req.user.id);
+      const authorizedDriverId = drv ? drv.id : req.user.id;
+      if (targetDriverId && targetDriverId !== authorizedDriverId) {
+        return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Drivers can only report location for their own vehicle' } });
+      }
+      driverId = authorizedDriverId;
+    } else if (process.env.NODE_ENV === 'production' && process.env.DEMO_MODE !== 'true' && !req.user) {
+      return res.status(401).json({ error: { code: 'UNAUTHORIZED', message: 'Driver authentication required in production mode' } });
+    }
+
     if (!driverId) {
       return res.status(400).json({ error: 'Driver identifier required' });
     }
@@ -375,15 +461,25 @@ async function startServer() {
     const numLat = Number(lat);
     const numLng = Number(lng);
 
-    // Reject invalid or wildly out-of-bounds telemetry (Lebanon bounds: ~33.0 to 35.0 lat, 35.0 to 36.8 lng)
-    if (isNaN(numLat) || isNaN(numLng) || numLat < 33.0 || numLat > 35.0 || numLng < 35.0 || numLng > 36.8) {
-      return res.status(400).json({ error: { code: 'INVALID_COORDINATES', message: 'Coordinates outside valid operational territory' } });
+    // Geographically valid coordinates (-90..90, -180..180)
+    if (isNaN(numLat) || isNaN(numLng) || numLat < -90 || numLat > 90 || numLng < -180 || numLng > 180) {
+      return res.status(400).json({ error: { code: 'INVALID_COORDINATES', message: 'Invalid latitude/longitude coordinates' } });
+    }
+
+    // Timestamp freshness validation: reject future timestamps and data older than 5 minutes
+    const pingTimestamp = Number(reqTimestamp) || Date.now();
+    const now = Date.now();
+    if (pingTimestamp > now + 15000) {
+      return res.status(400).json({ error: { code: 'INVALID_TIMESTAMP', message: 'Telemetry timestamp is in the future' } });
+    }
+    if (now - pingTimestamp > 5 * 60 * 1000) {
+      return res.status(400).json({ error: { code: 'STALE_GPS_DATA', message: 'Telemetry timestamp is older than 5 minutes' } });
     }
 
     // Check impossible speed / teleportation against previous ping
     const existingDriver = db.getDriver(driverId);
     if (existingDriver && existingDriver.currentLocation && existingDriver.currentLocation.timestamp > 0 && !isSimulated) {
-      const timeDeltaSec = (Date.now() - existingDriver.currentLocation.timestamp) / 1000;
+      const timeDeltaSec = (now - existingDriver.currentLocation.timestamp) / 1000;
       if (timeDeltaSec > 0 && timeDeltaSec < 120) {
         const distKm = haversineKm(
           existingDriver.currentLocation.lat,
@@ -408,6 +504,7 @@ async function startServer() {
       speed: cleanSpeed,
       heading: Number(heading) || 0,
       accuracy: Math.min(200, Number(accuracy) || 5),
+      timestamp: pingTimestamp,
       batteryLevel: batteryLevel !== undefined ? Number(batteryLevel) : undefined,
       networkStatus,
       isSimulated: Boolean(isSimulated),
@@ -424,29 +521,37 @@ async function startServer() {
       status: updated.status,
     });
 
-    // 2. If driver is on an active delivery, compute dynamic ETA and broadcast to order room
-    if (updated.currentOrderId) {
-      const order = db.getOrder(updated.currentOrderId);
-      if (order && order.dropoffCoords) {
+    // 2. If driver is on an active trip, compute dynamic ETA and broadcast to trip/order rooms
+    const activeTripId = updated.currentTripId || updated.currentOrderId;
+    if (activeTripId) {
+      const trip = db.getOrder(activeTripId);
+      if (trip && trip.dropoffCoords) {
         try {
           const etaResult = await calculateDynamicEta({
-            orderId: order.id,
+            tripId: trip.id,
+            orderId: trip.id,
             driverLocation: updated.currentLocation,
-            destinationCoords: order.dropoffCoords,
+            destinationCoords: (trip.status === 'EN_ROUTE_PICKUP' || trip.status === 'AT_PICKUP') ? trip.pickupCoords : trip.dropoffCoords,
           });
 
-          order.estimatedMinutes = etaResult.etaMinutes;
-          order.roadDistanceKm = etaResult.roadDistanceKm;
+          trip.estimatedMinutes = etaResult.etaMinutes;
+          trip.roadDistanceKm = etaResult.roadDistanceKm;
 
-          io.to(`order:${order.id}`).emit('order:eta_update', {
-            orderId: order.id,
+          const etaPayload = {
+            tripId: trip.id,
+            orderId: trip.id,
             driverLocation: updated.currentLocation,
             etaMinutes: etaResult.etaMinutes,
             roadDistanceKm: etaResult.roadDistanceKm,
             polyline: etaResult.polyline,
             trafficLevel: etaResult.trafficLevel,
             trafficSource: etaResult.trafficAssessmentBasis,
-          });
+          };
+
+          io.to(`trip:${trip.id}`).emit('trip:eta_update', etaPayload);
+          io.to(`order:${trip.id}`).emit('order:eta_update', etaPayload);
+          io.to(`trip:${trip.id}`).emit('driver:location', { driverId: updated.id, location: updated.currentLocation });
+          io.to(`order:${trip.id}`).emit('driver:location', { driverId: updated.id, location: updated.currentLocation });
         } catch (err) {
           console.warn('Live ETA calculation error:', err);
         }
@@ -454,11 +559,24 @@ async function startServer() {
     }
 
     res.json({ success: true, driverId, location: updated.currentLocation });
-  });
+  };
+
+  app.post('/api/telemetry', optionalAuth, telemetryHandler);
+  app.post('/api/drivers/:id/location', optionalAuth, telemetryHandler);
 
   // Offline Sync: Batch telemetry upload on reconnection
   app.post('/api/telemetry/batch', optionalAuth, (req, res) => {
-    const { driverId, points } = req.body;
+    const { driverId: reqDriverId, points } = req.body;
+    let driverId = reqDriverId;
+    if (req.user?.role === 'DRIVER') {
+      const drv = db.getDriverByUserId(req.user.id);
+      const authorizedDriverId = drv ? drv.id : req.user.id;
+      if (reqDriverId && reqDriverId !== authorizedDriverId) {
+        return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Unauthorized driver telemetry batch' } });
+      }
+      driverId = authorizedDriverId;
+    }
+
     if (!driverId || !Array.isArray(points)) {
       return res.status(400).json({ error: 'Invalid batch points payload' });
     }
@@ -550,21 +668,58 @@ async function startServer() {
     res.json(vehicles);
   });
 
-  // ==================== ORDERS & DISPATCH ====================
+  // ==================== TRIPS & DISPATCH ====================
 
-  app.get('/api/orders', optionalAuth, (req, res) => {
-    const { networkCode, companyId } = req.query;
-    const targetComp = (companyId || networkCode || req.user?.companyId) as string | undefined;
-    const orders = db.listOrders(targetComp);
-    res.json(orders);
-  });
+  const listTripsHandler = (req: express.Request, res: express.Response) => {
+    const { networkCode, companyId, driverId } = req.query;
+    // Strict isolation: authenticated user's company is authoritative
+    const targetComp = req.user?.companyId || ((companyId || networkCode) as string | undefined);
+    let trips = db.listOrders(targetComp);
 
-  app.post('/api/orders', optionalAuth, async (req, res) => {
+    // If authenticated user is a driver, only return trips assigned to them
+    if (req.user?.role === 'DRIVER') {
+      const drv = db.getDriverByUserId(req.user.id);
+      if (drv) {
+        trips = trips.filter((t) => t.assignedDriverId === drv.id);
+      }
+    } else if (driverId) {
+      trips = trips.filter((t) => t.assignedDriverId === driverId);
+    }
+    res.json(trips);
+  };
+
+  const getTripHandler = (req: express.Request, res: express.Response) => {
+    const trip = db.getOrder(req.params.id);
+    if (!trip) {
+      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Trip not found' } });
+    }
+    // Company isolation
+    if (req.user?.companyId && trip.companyId !== req.user.companyId) {
+      return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Access denied to trip from another company' } });
+    }
+    // Driver isolation: driver can only view their assigned trip
+    if (req.user?.role === 'DRIVER') {
+      const drv = db.getDriverByUserId(req.user.id);
+      if (drv && trip.assignedDriverId !== drv.id) {
+        return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Access denied to trip assigned to another driver' } });
+      }
+    }
+    res.json(trip);
+  };
+
+  app.get('/api/orders', optionalAuth, listTripsHandler);
+  app.get('/api/trips', optionalAuth, listTripsHandler);
+  app.get('/api/orders/:id', optionalAuth, getTripHandler);
+  app.get('/api/trips/:id', optionalAuth, getTripHandler);
+
+  const createTripHandler = async (req: express.Request, res: express.Response) => {
     const {
       networkCode,
       companyId: reqCompId,
       customerName,
       customerPhone,
+      studentName,
+      studentPhone,
       pickupAddress,
       pickupCoords,
       dropoffAddress,
@@ -574,12 +729,13 @@ async function startServer() {
       priority,
     } = req.body;
 
-    const comp = db.getCompany(reqCompId || networkCode || req.user?.companyId || 'NORTH-77');
-    if (!comp) return res.status(400).json({ error: 'Valid company required' });
+    const authoritativeCompanyId = req.user?.companyId || reqCompId || networkCode || 'NORTH-77';
+    const comp = db.getCompany(authoritativeCompanyId);
+    if (!comp) return res.status(400).json({ error: { code: 'INVALID_COMPANY', message: 'Valid company required' } });
 
     // Calculate real road distance and initial route geometry using OSRM
-    let roadDistanceKm = 5.0;
-    let estimatedMinutes = 15;
+    let roadDistanceKm = 2.0;
+    let estimatedMinutes = 8;
     let routeGeometry: [number, number][] = [];
 
     if (pickupCoords && dropoffCoords) {
@@ -594,20 +750,19 @@ async function startServer() {
         estimatedMinutes = roadRoute.durationMinutes;
         routeGeometry = roadRoute.polyline;
       } catch (err) {
-        console.warn('OSRM calculation error on order creation:', err);
+        console.warn('OSRM calculation error on trip creation:', err);
       }
     }
 
-    const newOrder = db.createOrder({
+    const newTrip = db.createOrder({
       companyId: comp.id,
-      networkCode: comp.code,
-      customerName: customerName || 'Valued Customer',
-      customerPhone: customerPhone || '+961 70 000 000',
-      pickupAddress,
-      pickupCoords: pickupCoords || { lat: 34.4367, lng: 35.8308 },
-      dropoffAddress,
-      dropoffCoords: dropoffCoords || { lat: 34.4255, lng: 35.8423 },
-      packageInfo: packageInfo || 'Courier Package',
+      studentName: (studentName || customerName || 'Student').trim(),
+      studentPhone: (studentPhone || customerPhone || '').trim(),
+      pickupAddress: pickupAddress || 'Campus Crest Dorms, Blat',
+      pickupCoords: pickupCoords || { lat: 34.1215, lng: 35.663 },
+      dropoffAddress: dropoffAddress || 'LAU Byblos - Upper Gate',
+      dropoffCoords: dropoffCoords || { lat: 34.1238, lng: 35.6698 },
+      packageInfo: (req.body.notes || packageInfo || 'Campus Dorm Shuttle').trim(),
       priority: priority || 'normal',
       assignedDriverId,
       roadDistanceKm,
@@ -616,45 +771,95 @@ async function startServer() {
     });
 
     // Realtime broadcast to company dispatch room
-    io.to(`company:${comp.id}`).emit('order:created', newOrder);
+    io.to(`company:${comp.id}`).emit('trip:created', newTrip);
+    io.to(`company:${comp.id}`).emit('order:created', newTrip);
 
     // If driver assigned, push to driver room
     if (assignedDriverId) {
-      io.to(`driver:${assignedDriverId}`).emit('order:assigned', newOrder);
+      io.to(`driver:${assignedDriverId}`).emit('trip:assigned', newTrip);
+      io.to(`driver:${assignedDriverId}`).emit('order:assigned', newTrip);
     }
 
-    res.status(201).json(newOrder);
-  });
+    res.status(201).json(newTrip);
+  };
 
-  app.patch('/api/orders/:id/assign', optionalAuth, (req, res) => {
+  app.post('/api/orders', optionalAuth, createTripHandler);
+  app.post('/api/trips', optionalAuth, createTripHandler);
+
+  const assignTripHandler = (req: express.Request, res: express.Response) => {
     const { driverId } = req.body;
-    const order = db.assignOrder(req.params.id, driverId);
-    if (!order) return res.status(404).json({ error: 'Order not found' });
-
-    io.to(`company:${order.companyId || order.networkCode}`).emit('order:updated', order);
-    if (driverId) {
-      io.to(`driver:${driverId}`).emit('order:assigned', order);
+    const authCompanyId = req.user?.companyId;
+    const result = db.assignOrder(req.params.id, driverId, authCompanyId);
+    if (!result) {
+      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Trip not found' } });
+    }
+    if ('error' in result) {
+      return res.status(400).json({ error: { code: 'ASSIGNMENT_ERROR', message: result.error } });
     }
 
-    res.json(order);
-  });
+    const trip = result;
+    io.to(`company:${trip.companyId || trip.networkCode}`).emit('trip:updated', trip);
+    io.to(`company:${trip.companyId || trip.networkCode}`).emit('order:updated', trip);
+    if (driverId) {
+      io.to(`driver:${driverId}`).emit('trip:assigned', trip);
+      io.to(`driver:${driverId}`).emit('order:assigned', trip);
+    }
 
-  app.patch('/api/orders/:id/status', optionalAuth, (req, res) => {
+    res.json(trip);
+  };
+
+  app.patch('/api/orders/:id/assign', optionalAuth, assignTripHandler);
+  app.patch('/api/trips/:id/assign', optionalAuth, assignTripHandler);
+
+  const updateStatusHandler = (req: express.Request, res: express.Response) => {
     const { note } = req.body;
     const status = (req.body.status as string)?.toUpperCase();
-    const order = db.updateOrderStatus(req.params.id, status as OrderStatus, note);
-    if (!order) return res.status(404).json({ error: 'Order not found' });
+    const existing = db.getOrder(req.params.id);
+    if (!existing) {
+      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Trip not found' } });
+    }
 
-    io.to(`company:${order.companyId || order.networkCode}`).emit('order:updated', order);
-    io.to(`order:${order.id}`).emit('order:status_changed', {
-      orderId: order.id,
-      status: order.status,
+    // Role-based authorization: driver can only update assigned trips; company can only update its own trips
+    if (req.user?.role === 'DRIVER') {
+      const drv = db.getDriverByUserId(req.user.id);
+      if (drv && existing.assignedDriverId !== drv.id) {
+        return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Drivers can only update trips assigned to them.' } });
+      }
+    } else if (req.user?.companyId && existing.companyId !== req.user.companyId) {
+      return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Cannot modify trips belonging to another company.' } });
+    }
+
+    const result = db.updateOrderStatus(req.params.id, status as OrderStatus, note);
+    if (!result) {
+      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Trip not found' } });
+    }
+    if ('error' in result) {
+      return res.status(400).json({ error: { code: 'INVALID_TRANSITION', message: result.error } });
+    }
+
+    const trip = result;
+    io.to(`company:${trip.companyId || trip.networkCode}`).emit('trip:updated', trip);
+    io.to(`company:${trip.companyId || trip.networkCode}`).emit('order:updated', trip);
+
+    const statusPayload = {
+      orderId: trip.id,
+      tripId: trip.id,
+      status: trip.status,
       timestamp: Date.now(),
       note,
-    });
+    };
+    io.to(`order:${trip.id}`).emit('order:status_changed', statusPayload);
+    io.to(`trip:${trip.id}`).emit('trip:status_changed', statusPayload);
+    if (trip.trackingToken) {
+      io.to(`order:${trip.trackingToken}`).emit('order:status_changed', statusPayload);
+      io.to(`trip:${trip.trackingToken}`).emit('trip:status_changed', statusPayload);
+    }
 
-    res.json(order);
-  });
+    res.json(trip);
+  };
+
+  app.patch('/api/orders/:id/status', optionalAuth, updateStatusHandler);
+  app.patch('/api/trips/:id/status', optionalAuth, updateStatusHandler);
 
   // ==================== SECURE STUDENT & PUBLIC TRACKING API ====================
 
@@ -690,7 +895,7 @@ async function startServer() {
     }
 
     const driver = order.assignedDriverId ? db.getDriver(order.assignedDriverId) : null;
-    const isCompletedOrCancelled = order.status === 'DELIVERED' || order.status === 'CANCELLED';
+    const isCompletedOrCancelled = order.status === 'DELIVERED' || order.status === 'COMPLETED' || order.status === 'CANCELLED';
 
     // Calculate dynamic ETA using multi-signal engine
     let dynamicEtaResult: Partial<EtaCalculationResult> = {
@@ -706,7 +911,7 @@ async function startServer() {
         dynamicEtaResult = await calculateDynamicEta({
           orderId: order.id,
           driverLocation: driver.currentLocation,
-          destinationCoords: order.status === 'ARRIVED_PICKUP' || order.status === 'DRIVER_EN_ROUTE_PICKUP'
+          destinationCoords: order.status === 'ARRIVED_PICKUP' || order.status === 'DRIVER_EN_ROUTE_PICKUP' || order.status === 'AT_PICKUP' || order.status === 'EN_ROUTE_PICKUP'
             ? order.pickupCoords
             : order.dropoffCoords,
         });
@@ -726,11 +931,16 @@ async function startServer() {
       order.status === 'DRIVER_EN_ROUTE_PICKUP' ||
       order.status === 'ASSIGNED';
 
+    const GPS_STALE_AFTER = Number(process.env.GPS_STALE_AFTER) || 30;
+    const GPS_OFFLINE_AFTER = Number(process.env.GPS_OFFLINE_AFTER) || 120;
+
     const lastUpdatedSecondsAgo = Math.max(
       0,
       Math.round((Date.now() - (driver?.currentLocation.timestamp || order.updatedAt)) / 1000)
     );
-    const isStale = driver ? lastUpdatedSecondsAgo > 35 : false;
+    const isStale = driver ? lastUpdatedSecondsAgo > GPS_STALE_AFTER : false;
+    const gpsFreshness: 'FRESH' | 'STALE' | 'OFFLINE' =
+      lastUpdatedSecondsAgo <= 15 ? 'FRESH' : lastUpdatedSecondsAgo <= GPS_OFFLINE_AFTER ? 'STALE' : 'OFFLINE';
 
     if (isCompleted) {
       trackingState = 'COMPLETED';
@@ -750,60 +960,82 @@ async function startServer() {
       trackingState = 'WAITING_FOR_DRIVER';
     }
 
-    if (driver && lastUpdatedSecondsAgo > 300 && !isCompleted && !isCancelled) {
+    if (driver && lastUpdatedSecondsAgo > GPS_OFFLINE_AFTER && !isCompleted && !isCancelled) {
       trackingState = 'LOCATION_UNAVAILABLE';
     }
 
     // Build strictly privacy-compliant public response
     // Student should only see: Taxi/Driver first name, vehicle info, live coordinates during active trip only.
-    // NEVER expose driver phone, email, home, or completed trip coordinates.
+    // NEVER expose driver phone, email, home, internal notes, or database IDs.
     const response: PublicTrackingResponse = {
-      order: {
-        id: order.id,
-        trackingCode: order.trackingCode,
-        customerName: order.customerName,
-        pickupAddress: order.pickupAddress,
-        pickupCoords: order.pickupCoords,
-        dropoffAddress: order.dropoffAddress,
-        dropoffCoords: order.dropoffCoords,
-        status: order.status,
-        packageInfo: order.packageInfo,
-        updatedAt: order.updatedAt,
+      status: order.status,
+      tripStatus: order.status,
+      trackingState,
+      trackingCode: order.trackingCode,
+      companyName: db.getCompany(order.companyId)?.name || 'Byblos Student Fleet & Shuttle',
+      studentName: order.studentName || order.customerName,
+      pickup: {
+        address: order.pickupAddress,
+        lat: order.pickupCoords.lat,
+        lng: order.pickupCoords.lng,
+      },
+      destination: {
+        address: order.dropoffAddress,
+        lat: order.dropoffCoords.lat,
+        lng: order.dropoffCoords.lng,
       },
       driver: driver
         ? {
             name: driver.name.split(' ')[0], // First name only
             vehicleModel: driver.vehicleModel,
             plateNumber: driver.plateNumber,
-            // STOP exposing live driver location when trip is completed or cancelled
-            currentLocation: !isCompletedOrCancelled
-              ? {
-                  lat: driver.currentLocation.lat,
-                  lng: driver.currentLocation.lng,
-                  speed: driver.currentLocation.speed,
-                  heading: driver.currentLocation.heading,
-                  accuracy: driver.currentLocation.accuracy,
-                  timestamp: driver.currentLocation.timestamp,
-                }
-              : undefined,
-            rating: driver.rating,
-            phone: undefined, // Strictly never expose driver phone number
           }
         : null,
-      roadRoute: !isCompletedOrCancelled ? dynamicEtaResult.polyline : [],
-      liveEtaMinutes: !isCompletedOrCancelled ? dynamicEtaResult.etaMinutes : 0,
-      distanceKm: dynamicEtaResult.roadDistanceKm,
-      trafficCondition: dynamicEtaResult.trafficLevel,
-      trafficSource: dynamicEtaResult.trafficAssessmentBasis,
+      vehicle: driver
+        ? {
+            makeModel: driver.vehicleModel,
+            plateNumber: driver.plateNumber,
+          }
+        : null,
+      taxiLocation: (!isCompletedOrCancelled && driver?.currentLocation)
+        ? {
+            lat: driver.currentLocation.lat,
+            lng: driver.currentLocation.lng,
+            speed: driver.currentLocation.speed,
+            heading: driver.currentLocation.heading,
+            timestamp: driver.currentLocation.timestamp,
+          }
+        : null,
+      roadRoute: !isCompletedOrCancelled ? (dynamicEtaResult.polyline || []) : [],
+      etaMinutes: !isCompletedOrCancelled ? (dynamicEtaResult.etaMinutes ?? null) : 0,
+      distanceKm: dynamicEtaResult.roadDistanceKm ?? null,
+      lastUpdated: driver?.currentLocation.timestamp || order.updatedAt,
       lastUpdatedSecondsAgo,
       isStale,
-      trackingState,
+      gpsFreshness,
+      // Backwards compatibility fields for transition shims
+      order: {
+        id: order.id,
+        trackingCode: order.trackingCode,
+        customerName: order.customerName || order.studentName || 'Student',
+        pickupAddress: order.pickupAddress,
+        pickupCoords: order.pickupCoords,
+        dropoffAddress: order.dropoffAddress,
+        dropoffCoords: order.dropoffCoords,
+        status: order.status,
+        packageInfo: order.packageInfo || 'Campus Shuttle',
+        updatedAt: order.updatedAt,
+      },
+      liveEtaMinutes: !isCompletedOrCancelled ? (dynamicEtaResult.etaMinutes || 0) : 0,
+      trafficCondition: (dynamicEtaResult.trafficLevel as 'Normal' | 'Moderate' | 'Heavy') || 'Normal',
+      trafficSource: dynamicEtaResult.trafficAssessmentBasis || 'Live Road Geometry',
     };
 
     res.json(response);
   };
 
   app.get('/api/orders/track/:tokenOrCode', handlePublicTracking);
+  app.get('/api/trips/track/:tokenOrCode', handlePublicTracking);
   app.get('/api/public/tracking/:tokenOrCode', handlePublicTracking);
 
   // ==================== FLEET ANALYTICS ====================
