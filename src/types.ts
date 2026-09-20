@@ -11,6 +11,7 @@ export type DriverStatus =
   | 'AT_DESTINATION'
   | 'PAUSED';
 
+// Canonical Trip Status State Machine
 export type TripStatus =
   | 'CREATED'
   | 'ASSIGNED'
@@ -21,9 +22,6 @@ export type TripStatus =
   | 'AT_DESTINATION'
   | 'COMPLETED'
   | 'CANCELLED';
-
-// Compatibility alias for API and internal migrations
-export type OrderStatus = TripStatus;
 
 export interface User {
   id: string;
@@ -94,19 +92,10 @@ export interface Driver {
   isLeadDriver: boolean;
   status: DriverStatus;
   currentLocation: DriverLocation;
-  currentOrderId?: string;
   currentTripId?: string;
   totalTrips: number;
   rating: number;
   lastHeartbeat?: number;
-  activeTrip?: {
-    id: string;
-    startTime: number;
-    startLocation: { lat: number; lng: number };
-    breadcrumbs: DriverLocation[];
-    distanceKm: number;
-    maxSpeedKmH: number;
-  };
 }
 
 export interface TripStatusHistoryItem {
@@ -117,17 +106,18 @@ export interface TripStatusHistoryItem {
   location?: { lat: number; lng: number };
 }
 
-export type OrderStatusHistoryItem = TripStatusHistoryItem;
-
 export interface Trip {
   id: string;
   companyId: string;
   networkCode?: string;
   driverId?: string;
+  assignedDriverId?: string;
   vehicleId?: string;
   trackingCode: string;
   trackingToken: string; // Cryptographic 256-bit unguessable credential
   trackingTokenExpiresAt?: number;
+  tokenExpiresAt?: number;
+  tokenRevoked?: boolean;
   studentName: string;
   studentPhone?: string;
   pickupAddress: string;
@@ -135,7 +125,6 @@ export interface Trip {
   dropoffAddress: string;
   dropoffCoords: { lat: number; lng: number };
   priority?: 'normal' | 'high' | 'urgent';
-  assignedDriverId?: string;
   status: TripStatus;
   createdAt: number;
   updatedAt: number;
@@ -147,16 +136,8 @@ export interface Trip {
   routeGeometry?: [number, number][]; // actual road polyline from OSRM
   statusHistory?: TripStatusHistoryItem[];
   notes?: string;
-
-  // Compatibility fields for legacy references
-  customerName?: string;
-  customerPhone?: string;
-  packageInfo?: string;
   liveEtaMinutes?: number;
 }
-
-// Canonical model is Trip; Order is kept only as type alias
-export type Order = Trip;
 
 export type StudentTrackingState =
   | 'WAITING_FOR_DRIVER'
@@ -189,7 +170,6 @@ export interface TripLog {
   networkCode?: string;
   vehicleId?: string;
   tripId?: string;
-  orderId?: string;
   startTime: number;
   endTime: number;
   startAddress: string;
@@ -224,10 +204,9 @@ export interface Invite {
  */
 export interface PublicTrackingResponse {
   status: TripStatus;
+  tripStatus?: TripStatus;
   trackingState: StudentTrackingState;
-  trackingCode: string;
-  companyName?: string;
-  studentName?: string;
+  trackingCode?: string;
   pickup: {
     address: string;
     lat: number;
@@ -245,41 +224,18 @@ export interface PublicTrackingResponse {
     heading: number;
     timestamp: number;
   } | null;
-  etaMinutes: number | null;
-  distanceKm: number | null;
-  lastUpdated: number;
-  lastUpdatedSecondsAgo: number;
-  isStale: boolean;
-  gpsFreshness: 'FRESH' | 'STALE' | 'OFFLINE';
-  roadRoute: [number, number][];
   vehicle: {
     makeModel: string;
     plateNumber: string;
     type?: string;
   } | null;
-  driver?: {
-    name: string; // First name only
-    vehicleModel?: string;
-    plateNumber?: string;
-  } | null;
-
-  // Backwards compatibility shim for existing consumers during transition
-  tripStatus?: TripStatus;
-  order?: {
-    id: string;
-    trackingCode: string;
-    customerName: string;
-    pickupAddress: string;
-    pickupCoords: { lat: number; lng: number };
-    dropoffAddress: string;
-    dropoffCoords: { lat: number; lng: number };
-    status: TripStatus;
-    packageInfo: string;
-    updatedAt: number;
-  };
-  liveEtaMinutes?: number;
-  trafficCondition?: string;
-  trafficSource?: string;
+  etaMinutes: number | null;
+  distanceKm: number | null;
+  lastUpdated: number;
+  lastUpdatedSecondsAgo: number;
+  gpsFreshness: 'FRESH' | 'STALE' | 'OFFLINE';
+  isStale: boolean;
+  roadRoute: [number, number][];
 }
 
 export interface NorthLebanonLocation {

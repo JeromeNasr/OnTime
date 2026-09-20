@@ -1,12 +1,12 @@
 import React, { useState } from 'react';
 import { Copy, Check, Plus, UserPlus } from 'lucide-react';
-import { Driver, Order, Network, TripLog } from '../types';
+import { Driver, Trip, Network, TripLog } from '../types';
 import { StatusChip } from './StatusChip';
 
 interface CompanyDashboardViewProps {
   network: Network;
   drivers: Driver[];
-  orders: Order[];
+  trips: Trip[];
   tripLogs: TripLog[];
   onAddDriver: (driverData: Partial<Driver>) => void;
   onSetLeadDriver: (driverId: string) => void;
@@ -15,7 +15,7 @@ interface CompanyDashboardViewProps {
 export const CompanyDashboardView: React.FC<CompanyDashboardViewProps> = ({
   network,
   drivers,
-  orders,
+  trips,
   onAddDriver,
   onSetLeadDriver,
 }) => {
@@ -42,20 +42,20 @@ export const CompanyDashboardView: React.FC<CompanyDashboardViewProps> = ({
       (d.currentLocation && d.currentLocation.speed > 0)
   ).length;
 
-  const activeTrips = orders.filter(
-    (o) => o.status !== 'DELIVERED' && o.status !== 'CANCELLED' && o.status !== 'COMPLETED'
+  const activeTrips = trips.filter(
+    (t) => t.status !== 'CANCELLED' && t.status !== 'COMPLETED'
   );
   const activeTripsCount = activeTrips.length;
 
   // Real ETA calculation across active trips
   const activeWithEta = activeTrips.filter(
-    (o) => (o.estimatedMinutes && o.estimatedMinutes > 0) || (o.liveEtaMinutes && o.liveEtaMinutes > 0)
+    (t) => (t.estimatedMinutes && t.estimatedMinutes > 0) || (t.liveEtaMinutes && t.liveEtaMinutes > 0)
   );
   const avgEtaMinutes =
     activeWithEta.length > 0
       ? Math.round(
           activeWithEta.reduce(
-            (acc, o) => acc + (o.liveEtaMinutes || o.estimatedMinutes || 0),
+            (acc, t) => acc + (t.liveEtaMinutes || t.estimatedMinutes || 0),
             0
           ) / activeWithEta.length
         )
@@ -251,36 +251,36 @@ export const CompanyDashboardView: React.FC<CompanyDashboardViewProps> = ({
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-sm font-bold text-white">Dorm Shuttle Trips</h2>
             <span className="text-xs text-[#4a5568] tabular-nums font-mono">
-              {orders.length} total
+              {trips.length} total
             </span>
           </div>
 
           <div className="flex flex-col gap-2 max-h-[460px] overflow-y-auto pr-1">
-            {orders.length === 0 ? (
+            {trips.length === 0 ? (
               <div className="p-6 text-center text-xs text-[#4a5568]">
                 No shuttle trips created yet.
               </div>
             ) : (
-              orders.map((order) => {
-                const assigned = drivers.find((d) => d.id === order.assignedDriverId);
-                const trackingLink = `${window.location.origin}/?track=${order.trackingCode || order.id}`;
+              trips.map((trip) => {
+                const assigned = drivers.find((d) => d.id === trip.assignedDriverId);
+                const trackingLink = `${window.location.origin}/?track=${trip.trackingToken || trip.trackingCode || trip.id}`;
 
                 return (
                   <div
-                    key={order.id}
+                    key={trip.id}
                     className="bg-[#0a0a0f] border border-white/[0.06] rounded-lg p-3 flex items-center justify-between gap-3 hover:border-white/[0.12] transition-colors"
                   >
                     <div className="min-w-0">
                       <div className="flex items-center gap-2">
                         <span className="font-mono text-xs text-[#94a3b8]">
-                          {order.trackingCode || order.id.slice(-6)}
+                          {trip.trackingCode || trip.id.slice(-6)}
                         </span>
                         <span className="text-xs font-medium text-white truncate">
-                          {order.studentName || order.customerName}
+                          {trip.studentName}
                         </span>
                       </div>
                       <div className="text-[11px] text-[#4a5568] truncate mt-0.5">
-                        {order.pickupAddress} → {order.dropoffAddress}
+                        {trip.pickupAddress} → {trip.dropoffAddress}
                       </div>
                       <div className="text-[10px] text-[#94a3b8] mt-0.5">
                         Taxi: {assigned ? `${assigned.name} (${assigned.vehicleModel})` : 'Unassigned'}
@@ -288,7 +288,7 @@ export const CompanyDashboardView: React.FC<CompanyDashboardViewProps> = ({
                     </div>
 
                     <div className="flex flex-col items-end gap-1.5 shrink-0">
-                      <StatusChip status={order.status} />
+                      <StatusChip status={trip.status} />
                       <button
                         onClick={() => {
                           navigator.clipboard.writeText(trackingLink);

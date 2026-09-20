@@ -1,67 +1,67 @@
 import React, { useState } from 'react';
 import { Copy, Check, ChevronDown } from 'lucide-react';
-import { Driver, Order } from '../types';
+import { Driver, Trip } from '../types';
 import { JBEIL_HUBS } from '../data/jbeilData';
 import { StatusChip } from './StatusChip';
 
 interface LeadDriverDispatchViewProps {
   currentDriver: Driver;
   drivers: Driver[];
-  orders: Order[];
-  onCreateOrder: (orderData: Partial<Order>) => void;
-  onAssignOrder: (orderId: string, driverId: string) => void;
+  trips: Trip[];
+  onCreateTrip: (tripData: Partial<Trip>) => void;
+  onAssignTrip: (tripId: string, driverId: string) => void;
   onSelectDriverForMap: (driver: Driver) => void;
 }
 
 export const LeadDriverDispatchView: React.FC<LeadDriverDispatchViewProps> = ({
   drivers,
-  orders,
-  onCreateOrder,
-  onAssignOrder,
+  trips,
+  onCreateTrip,
+  onAssignTrip,
   onSelectDriverForMap,
 }) => {
-  const [customerName, setCustomerName] = useState('');
-  const [customerPhone, setCustomerPhone] = useState('');
+  const [studentName, setStudentName] = useState('');
+  const [studentPhone, setStudentPhone] = useState('');
   const [pickupHubIndex, setPickupHubIndex] = useState(0);
   const [dropoffHubIndex, setDropoffHubIndex] = useState(2);
-  const [packageInfo, setPackageInfo] = useState('');
+  const [notes, setNotes] = useState('');
   const [targetDriverId, setTargetDriverId] = useState<string>('');
-  const [copiedOrderId, setCopiedOrderId] = useState<string | null>(null);
+  const [copiedTripId, setCopiedTripId] = useState<string | null>(null);
 
-  const activeOrders = orders.filter((o) => {
-    const s = o.status.toUpperCase();
-    return s !== 'DELIVERED' && s !== 'CANCELLED';
+  const activeTrips = trips.filter((t) => {
+    const s = t.status.toUpperCase();
+    return s !== 'COMPLETED' && s !== 'CANCELLED';
   });
 
-  const handleCreateOrder = (e: React.FormEvent) => {
+  const handleCreateTrip = (e: React.FormEvent) => {
     e.preventDefault();
     const pickup = JBEIL_HUBS[pickupHubIndex] || JBEIL_HUBS[0];
     const dropoff = JBEIL_HUBS[dropoffHubIndex] || JBEIL_HUBS[1];
 
-    onCreateOrder({
-      customerName: customerName.trim() || 'Student / Passenger',
-      customerPhone: customerPhone.trim() || '+961 70 000 000',
+    onCreateTrip({
+      studentName: studentName.trim() || 'Student / Passenger',
+      studentPhone: studentPhone.trim() || '+961 70 000 000',
       pickupAddress: `${pickup.name}, ${pickup.area}`,
       pickupCoords: { lat: pickup.lat, lng: pickup.lng },
       dropoffAddress: `${dropoff.name}, ${dropoff.area}`,
       dropoffCoords: { lat: dropoff.lat, lng: dropoff.lng },
-      packageInfo: packageInfo.trim() || 'Campus Shuttle Ride',
+      notes: notes.trim() || 'Campus Shuttle Ride',
       priority: 'normal',
       assignedDriverId: targetDriverId || undefined,
     });
 
-    setCustomerName('');
-    setCustomerPhone('');
-    setPackageInfo('');
+    setStudentName('');
+    setStudentPhone('');
+    setNotes('');
     setTargetDriverId('');
   };
 
-  const copyTrackingLink = (order: Order) => {
-    const token = order.trackingToken || order.trackingCode || order.id;
+  const copyTrackingLink = (trip: Trip) => {
+    const token = trip.trackingToken || trip.trackingCode || trip.id;
     const url = `${window.location.origin}/?track=${encodeURIComponent(token)}`;
     navigator.clipboard.writeText(url);
-    setCopiedOrderId(order.id);
-    setTimeout(() => setCopiedOrderId(null), 2000);
+    setCopiedTripId(trip.id);
+    setTimeout(() => setCopiedTripId(null), 2000);
   };
 
   return (
@@ -70,34 +70,34 @@ export const LeadDriverDispatchView: React.FC<LeadDriverDispatchViewProps> = ({
       <div className="bg-[#13131a] border border-white/[0.06] rounded-xl p-4 sm:p-5">
         <h2 className="text-sm font-bold text-white mb-3">Dispatch Dorm Shuttle Trip</h2>
 
-        <form onSubmit={handleCreateOrder} className="flex flex-col gap-3">
+        <form onSubmit={handleCreateTrip} className="flex flex-col gap-3">
           {/* Row 1: Student Name & Phone */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
-              <label htmlFor="input-customer-name" className="block text-[11px] text-[#94a3b8] mb-1">
+              <label htmlFor="input-student-name" className="block text-[11px] text-[#94a3b8] mb-1">
                 Student Name
               </label>
               <input
-                id="input-customer-name"
+                id="input-student-name"
                 type="text"
                 placeholder="e.g. Maya Haddad"
-                value={customerName}
-                onChange={(e) => setCustomerName(e.target.value)}
+                value={studentName}
+                onChange={(e) => setStudentName(e.target.value)}
                 required
                 className="w-full bg-[#0a0a0f] border border-white/[0.06] focus:border-[#3b82f6] rounded-lg px-3 py-2 text-xs text-white placeholder-[#4a5568] outline-none transition-colors"
               />
             </div>
 
             <div>
-              <label htmlFor="input-customer-phone" className="block text-[11px] text-[#94a3b8] mb-1">
+              <label htmlFor="input-student-phone" className="block text-[11px] text-[#94a3b8] mb-1">
                 Student Mobile (Private)
               </label>
               <input
-                id="input-customer-phone"
+                id="input-student-phone"
                 type="text"
                 placeholder="+961 71 889 231"
-                value={customerPhone}
-                onChange={(e) => setCustomerPhone(e.target.value)}
+                value={studentPhone}
+                onChange={(e) => setStudentPhone(e.target.value)}
                 className="w-full bg-[#0a0a0f] border border-white/[0.06] focus:border-[#3b82f6] rounded-lg px-3 py-2 text-xs text-white placeholder-[#4a5568] outline-none transition-colors"
               />
             </div>
@@ -151,15 +151,15 @@ export const LeadDriverDispatchView: React.FC<LeadDriverDispatchViewProps> = ({
           {/* Row 3: Trip Notes & Optional Initial Assignee + Submit */}
           <div className="grid grid-cols-1 sm:grid-cols-12 gap-3 items-end pt-1">
             <div className="sm:col-span-6">
-              <label htmlFor="input-package-desc" className="block text-[11px] text-[#94a3b8] mb-1">
+              <label htmlFor="input-trip-notes" className="block text-[11px] text-[#94a3b8] mb-1">
                 Trip Notes / Gate Details
               </label>
               <input
-                id="input-package-desc"
+                id="input-trip-notes"
                 type="text"
                 placeholder="e.g. Dorm Building B front lobby"
-                value={packageInfo}
-                onChange={(e) => setPackageInfo(e.target.value)}
+                value={notes}
+                onChange={(e) => setNotes(e.target.value)}
                 className="w-full bg-[#0a0a0f] border border-white/[0.06] focus:border-[#3b82f6] rounded-lg px-3 py-2 text-xs text-white placeholder-[#4a5568] outline-none transition-colors"
               />
             </div>
@@ -191,7 +191,7 @@ export const LeadDriverDispatchView: React.FC<LeadDriverDispatchViewProps> = ({
             <div className="sm:col-span-2">
               <button
                 type="submit"
-                id="btn-dispatch-create-order"
+                id="btn-dispatch-create-trip"
                 className="w-full py-2 bg-[#3b82f6] hover:bg-blue-600 text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer"
               >
                 Dispatch
@@ -207,39 +207,39 @@ export const LeadDriverDispatchView: React.FC<LeadDriverDispatchViewProps> = ({
           <div className="flex items-center gap-2">
             <h3 className="text-sm font-bold text-white">Active Shuttle Trips</h3>
             <span className="text-xs font-mono text-[#94a3b8] tabular-nums">
-              ({activeOrders.length})
+              ({activeTrips.length})
             </span>
           </div>
         </div>
 
-        {activeOrders.length === 0 ? (
+        {activeTrips.length === 0 ? (
           <div className="bg-[#13131a] border border-dashed border-white/[0.06] rounded-xl p-8 text-center text-xs text-[#94a3b8]">
             No active trips in dispatch queue. Dispatch a new student shuttle trip above.
           </div>
         ) : (
           <div className="flex flex-col gap-2.5">
-            {activeOrders.map((order) => {
-              const assignedDriver = drivers.find((d) => d.id === order.assignedDriverId);
-              const isUnassigned = !order.assignedDriverId;
+            {activeTrips.map((trip) => {
+              const assignedDriver = drivers.find((d) => d.id === trip.assignedDriverId);
+              const isUnassigned = !trip.assignedDriverId;
 
               return (
                 <div
-                  key={order.id}
-                  id={`order-card-${order.id}`}
+                  key={trip.id}
+                  id={`trip-card-${trip.id}`}
                   className="bg-[#13131a] border border-white/[0.06] rounded-xl p-4 flex flex-col gap-2.5 hover:border-white/[0.12] transition-colors"
                 >
                   {/* Top line: Tracking Code monospace top-left & Status chip right-aligned */}
                   <div className="flex items-center justify-between gap-2">
                     <div className="flex items-center gap-2">
                       <span className="font-mono text-xs text-[#94a3b8]">
-                        {order.trackingCode || order.id.slice(-6)}
+                        {trip.trackingCode || trip.id.slice(-6)}
                       </span>
                       <button
-                        onClick={() => copyTrackingLink(order)}
+                        onClick={() => copyTrackingLink(trip)}
                         title="Copy student tracking link"
                         className="text-[#4a5568] hover:text-[#3b82f6] transition-colors cursor-pointer"
                       >
-                        {copiedOrderId === order.id ? (
+                        {copiedTripId === trip.id ? (
                           <Check className="w-3 h-3 text-[#22c55e]" />
                         ) : (
                           <Copy className="w-3 h-3" />
@@ -247,19 +247,19 @@ export const LeadDriverDispatchView: React.FC<LeadDriverDispatchViewProps> = ({
                       </button>
                     </div>
 
-                    <StatusChip status={order.status} />
+                    <StatusChip status={trip.status} />
                   </div>
 
                   {/* Student name bold */}
                   <div className="font-bold text-white text-sm">
-                    {order.studentName || order.customerName}
+                    {trip.studentName}
                   </div>
 
                   {/* Pickup → Dropoff as a one-line with an arrow */}
                   <div className="text-xs text-[#94a3b8] truncate">
-                    <span>{order.pickupAddress}</span>
+                    <span>{trip.pickupAddress}</span>
                     <span className="mx-2 text-[#4a5568]">→</span>
-                    <span className="text-slate-300">{order.dropoffAddress}</span>
+                    <span className="text-slate-300">{trip.dropoffAddress}</span>
                   </div>
 
                   {/* Bottom info & Assign action */}
@@ -281,10 +281,10 @@ export const LeadDriverDispatchView: React.FC<LeadDriverDispatchViewProps> = ({
                     {isUnassigned ? (
                       <div className="flex items-center gap-2">
                         <select
-                          id={`select-driver-order-${order.id}`}
+                          id={`select-driver-trip-${trip.id}`}
                           onChange={(e) => {
                             if (e.target.value) {
-                              onAssignOrder(order.id, e.target.value);
+                              onAssignTrip(trip.id, e.target.value);
                             }
                           }}
                           defaultValue=""
@@ -302,7 +302,7 @@ export const LeadDriverDispatchView: React.FC<LeadDriverDispatchViewProps> = ({
                       </div>
                     ) : (
                       <div className="text-[11px] text-[#4a5568]">
-                        {order.packageInfo}
+                        {trip.notes}
                       </div>
                     )}
                   </div>

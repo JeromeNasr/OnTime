@@ -14,7 +14,7 @@ import {
   Clock,
   Car,
 } from 'lucide-react';
-import { Driver, Order, OrderStatus } from '../types';
+import { Driver, Trip, TripStatus } from '../types';
 import { SpeedometerGauge } from './SpeedometerGauge';
 import { SIMULATED_ROUTES } from '../data/jbeilData';
 import { flushOfflineGpsQueue } from '../services/api';
@@ -22,7 +22,7 @@ import { StatusChip } from './StatusChip';
 
 interface DriverPhoneViewProps {
   currentDriver: Driver;
-  activeOrder?: Order | null;
+  currentTrip?: Trip | null;
   onUpdateLocation: (location: {
     lat: number;
     lng: number;
@@ -35,21 +35,21 @@ interface DriverPhoneViewProps {
   }) => void;
   onStartTrip: () => void;
   onEndTrip: () => void;
-  onUpdateOrderStatus: (orderId: string, status: OrderStatus) => void;
+  onUpdateTripStatus: (tripId: string, status: TripStatus) => void;
   onToggleStatus: (status: Driver['status']) => void;
 }
 
 export const DriverPhoneView: React.FC<DriverPhoneViewProps> = ({
   currentDriver,
-  activeOrder,
+  currentTrip,
   onUpdateLocation,
   onStartTrip,
   onEndTrip,
-  onUpdateOrderStatus,
+  onUpdateTripStatus,
   onToggleStatus,
 }) => {
-  // Tracking Mode: Real Phone GPS vs Simulated Jbeil Campus Loop
-  const [gpsMode, setGpsMode] = useState<'real' | 'simulated'>('simulated');
+  // Tracking Mode: Real Phone GPS (Default for real operations) vs Demo Campus Route
+  const [gpsMode, setGpsMode] = useState<'real' | 'simulated'>('real');
   const [isSimulating, setIsSimulating] = useState(false);
   const [isTrackingPaused] = useState(false);
   const [selectedRouteKey, setSelectedRouteKey] = useState<keyof typeof SIMULATED_ROUTES>('lauCampusLoop');
@@ -215,7 +215,7 @@ export const DriverPhoneView: React.FC<DriverPhoneViewProps> = ({
       const nextPoint = route[nextIdx];
       const bearing = calculateBearing(point.lat, point.lng, nextPoint.lat, nextPoint.lng);
 
-      const speedVariation = (Math.random() * 4 - 2) * simSpeedFactor;
+      const speedVariation = Math.sin(simIndexRef.current * 0.7) * 2 * simSpeedFactor;
       const currentSpeed = Math.max(0, Math.round(point.speed * simSpeedFactor + speedVariation));
 
       onUpdateLocation({
@@ -262,8 +262,8 @@ export const DriverPhoneView: React.FC<DriverPhoneViewProps> = ({
     return (toDeg(Math.atan2(y, x)) + 360) % 360;
   }
 
-  const isTripActive = !!currentDriver.activeTrip;
-  const orderStatusUpper = (activeOrder?.status || '').toUpperCase();
+  const isTripActive = !!currentTrip && currentTrip.status !== 'COMPLETED' && currentTrip.status !== 'CANCELLED';
+  const tripStatusUpper = (currentTrip?.status || '').toUpperCase();
 
   const headingVal = `${Math.round(currentDriver.currentLocation.heading || 0)}°`;
   const accuracyVal = `${Math.round(currentDriver.currentLocation.accuracy || 8)}m`;
@@ -447,13 +447,13 @@ export const DriverPhoneView: React.FC<DriverPhoneViewProps> = ({
                 <span>Trip in progress</span>
               </div>
               <div className="font-mono text-white">
-                {currentDriver.activeTrip?.distanceKm.toFixed(1)} km covered
+                {currentTrip?.roadDistanceKm ? `${currentTrip.roadDistanceKm.toFixed(1)} km estimated` : 'Live route'}
               </div>
             </div>
             <button
               id="btn-end-trip-log"
               onClick={onEndTrip}
-              className="w-full py-3.5 bg-[#ef4444] hover:bg-red-600 text-white font-medium rounded-lg text-sm transition-colors flex items-center justify-center gap-2"
+              className="w-full py-3.5 bg-[#ef4444] hover:bg-red-600 text-white font-medium rounded-lg text-sm transition-colors flex items-center justify-center gap-2 cursor-pointer"
             >
               <Square className="w-4 h-4 fill-current" />
               End Trip
@@ -463,7 +463,7 @@ export const DriverPhoneView: React.FC<DriverPhoneViewProps> = ({
           <button
             id="btn-start-trip-log"
             onClick={onStartTrip}
-            className="w-full py-3.5 bg-[#3b82f6] hover:bg-blue-600 text-white font-medium rounded-lg text-sm transition-colors flex items-center justify-center gap-2"
+            className="w-full py-3.5 bg-[#3b82f6] hover:bg-blue-600 text-white font-medium rounded-lg text-sm transition-colors flex items-center justify-center gap-2 cursor-pointer"
           >
             <Play className="w-4 h-4 fill-current" />
             Start Trip
@@ -472,14 +472,14 @@ export const DriverPhoneView: React.FC<DriverPhoneViewProps> = ({
       </div>
 
       {/* Active Trip Card */}
-      {activeOrder ? (
+      {currentTrip ? (
         <div className="bg-[#13131a] border border-white/[0.06] rounded-xl p-5 flex flex-col gap-4">
           <div className="flex items-center justify-between">
             <div>
-              <span className="text-[11px] font-mono text-[#4a5568]">TRIP #{activeOrder.id.slice(-6)}</span>
-              <h3 className="text-sm font-bold text-white mt-0.5">{activeOrder.studentName || activeOrder.customerName}</h3>
+              <span className="text-[11px] font-mono text-[#4a5568]">TRIP #{currentTrip.id.slice(-6)}</span>
+              <h3 className="text-sm font-bold text-white mt-0.5">{currentTrip.studentName}</h3>
             </div>
-            <StatusChip status={activeOrder.status} />
+            <StatusChip status={currentTrip.status} />
           </div>
 
           {/* Vertical Timeline (dot → line → dot) */}
@@ -491,14 +491,14 @@ export const DriverPhoneView: React.FC<DriverPhoneViewProps> = ({
             <div className="relative">
               <div className="absolute -left-6 top-[3px] w-3 h-3 rounded-full bg-[#22c55e] border-2 border-[#13131a]" />
               <div className="text-[10px] text-[#4a5568] uppercase font-medium">Pickup (Dorm)</div>
-              <div className="text-slate-200 mt-0.5">{activeOrder.pickupAddress}</div>
+              <div className="text-slate-200 mt-0.5">{currentTrip.pickupAddress}</div>
             </div>
 
             {/* Destination */}
             <div className="relative">
               <div className="absolute -left-6 top-[3px] w-3 h-3 rounded-full bg-[#ef4444] border-2 border-[#13131a]" />
               <div className="text-[10px] text-[#4a5568] uppercase font-medium">Destination (Campus)</div>
-              <div className="text-slate-200 mt-0.5">{activeOrder.dropoffAddress}</div>
+              <div className="text-slate-200 mt-0.5">{currentTrip.dropoffAddress}</div>
             </div>
           </div>
 
@@ -506,55 +506,55 @@ export const DriverPhoneView: React.FC<DriverPhoneViewProps> = ({
           <div className="pt-1 border-t border-white/[0.06]">
             <a
               href={`https://www.google.com/maps/dir/?api=1&destination=${
-                orderStatusUpper.includes('PICK') || orderStatusUpper === 'ASSIGNED' || orderStatusUpper === 'CREATED'
-                  ? `${activeOrder.pickupCoords.lat},${activeOrder.pickupCoords.lng}`
-                  : `${activeOrder.dropoffCoords.lat},${activeOrder.dropoffCoords.lng}`
+                tripStatusUpper.includes('PICK') || tripStatusUpper === 'ASSIGNED' || tripStatusUpper === 'CREATED'
+                  ? `${currentTrip.pickupCoords.lat},${currentTrip.pickupCoords.lng}`
+                  : `${currentTrip.dropoffCoords.lat},${currentTrip.dropoffCoords.lng}`
               }`}
               target="_blank"
               rel="noopener noreferrer"
               className="w-full h-11 bg-[#0a0a0f] hover:bg-[#1a1a24] text-slate-200 text-xs font-medium rounded-lg flex items-center justify-center gap-2 border border-white/[0.06] transition-colors"
             >
               <ExternalLink className="w-4 h-4 text-[#3b82f6]" />
-              <span>Navigate in Google Maps ({orderStatusUpper.includes('PICK') || orderStatusUpper === 'ASSIGNED' ? 'To Pickup' : 'To Campus'})</span>
+              <span>Navigate in Google Maps ({tripStatusUpper.includes('PICK') || tripStatusUpper === 'ASSIGNED' ? 'To Pickup' : 'To Campus'})</span>
             </a>
           </div>
 
           {/* Status Action Buttons - Large touch targets for driver safety */}
           <div className="flex flex-col gap-2 pt-2 border-t border-white/[0.06]">
-            {(orderStatusUpper === 'ASSIGNED' || orderStatusUpper === 'CREATED') && (
+            {(tripStatusUpper === 'ASSIGNED' || tripStatusUpper === 'CREATED') && (
               <button
-                id="btn-order-enroute-pickup"
-                onClick={() => onUpdateOrderStatus(activeOrder.id, 'DRIVER_EN_ROUTE_PICKUP')}
+                id="btn-trip-enroute-pickup"
+                onClick={() => onUpdateTripStatus(currentTrip.id, 'EN_ROUTE_PICKUP')}
                 className="w-full h-12 bg-[#3b82f6] hover:bg-blue-600 text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer"
               >
                 Depart for Student Pickup
               </button>
             )}
 
-            {orderStatusUpper === 'DRIVER_EN_ROUTE_PICKUP' && (
+            {(tripStatusUpper === 'EN_ROUTE_PICKUP') && (
               <button
-                id="btn-order-arrived-pickup"
-                onClick={() => onUpdateOrderStatus(activeOrder.id, 'ARRIVED_PICKUP')}
+                id="btn-trip-arrived-pickup"
+                onClick={() => onUpdateTripStatus(currentTrip.id, 'AT_PICKUP')}
                 className="w-full h-12 bg-[#f59e0b] hover:bg-amber-600 text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer"
               >
                 Arrived at Student Dorm
               </button>
             )}
 
-            {(orderStatusUpper === 'ARRIVED_PICKUP' || orderStatusUpper === 'AT_PICKUP') && (
+            {(tripStatusUpper === 'AT_PICKUP') && (
               <button
-                id="btn-order-confirm-pickup"
-                onClick={() => onUpdateOrderStatus(activeOrder.id, 'IN_TRANSIT')}
+                id="btn-trip-confirm-pickup"
+                onClick={() => onUpdateTripStatus(currentTrip.id, 'IN_TRANSIT')}
                 className="w-full h-12 bg-[#3b82f6] hover:bg-blue-600 text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer"
               >
                 Student Picked Up • Depart for Campus
               </button>
             )}
 
-            {orderStatusUpper === 'IN_TRANSIT' && (
+            {tripStatusUpper === 'IN_TRANSIT' && (
               <button
-                id="btn-order-delivered"
-                onClick={() => onUpdateOrderStatus(activeOrder.id, 'DELIVERED')}
+                id="btn-trip-delivered"
+                onClick={() => onUpdateTripStatus(currentTrip.id, 'COMPLETED')}
                 className="w-full h-12 bg-[#22c55e] hover:bg-green-600 text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer"
               >
                 Arrived at Campus Gate • Complete Trip

@@ -1,7 +1,6 @@
 import {
   Driver,
   Trip,
-  Order,
   TripLog,
   Company,
   Vehicle,
@@ -41,16 +40,18 @@ export function clearStoredToken(): void {
 }
 
 // Headers helper with bearer auth
-function getHeaders(): HeadersInit {
+export function getHeaders(): HeadersInit {
   const headers: HeadersInit = { 'Content-Type': 'application/json' };
   const token = getStoredToken();
   if (token) {
-    headers['Authorization'] = `Bearer ${token}`;
+    (headers as Record<string, string>)['Authorization'] = `Bearer ${token}`;
   }
   return headers;
 }
 
 // ==================== PERSISTENT OFFLINE GPS QUEUE (IndexedDB) ====================
+
+let isFlushing = false;
 
 export function queueOfflineGpsPoint(point: DriverLocation & { driverId: string }): void {
   storeOfflineGpsPoint(point).catch((err) => {
@@ -59,6 +60,8 @@ export function queueOfflineGpsPoint(point: DriverLocation & { driverId: string 
 }
 
 export async function flushOfflineGpsQueue(): Promise<number> {
+  if (isFlushing) return 0;
+  isFlushing = true;
   try {
     const queuedPoints: QueuedGpsPoint[] = await getQueuedOfflineGpsPoints();
     if (!queuedPoints || queuedPoints.length === 0) return 0;
@@ -109,6 +112,8 @@ export async function flushOfflineGpsQueue(): Promise<number> {
     }
   } catch (err) {
     console.warn('Offline GPS sync retry will occur upon reconnection:', err);
+  } finally {
+    isFlushing = false;
   }
   return 0;
 }
@@ -306,7 +311,7 @@ export const api = {
   },
 
   async fetchTripHistory(companyId?: string, driverId?: string): Promise<TripLog[]> {
-    let url = '/api/trips';
+    let url = '/api/trips/history';
     const params = new URLSearchParams();
     if (companyId) params.append('companyId', companyId);
     if (driverId) params.append('driverId', driverId);
@@ -317,38 +322,14 @@ export const api = {
     return res.json();
   },
 
-  // Backward compatibility order aliases
-  fetchOrders(companyId?: string): Promise<Order[]> {
-    return this.fetchTrips(companyId);
-  },
-  createOrder(orderData: Partial<Order>): Promise<Order> {
-    return this.createTrip(orderData);
-  },
-  assignOrder(orderId: string, driverId?: string): Promise<Order> {
-    return this.assignTrip(orderId, driverId);
-  },
-  updateOrderStatus(orderId: string, status: string, note?: string): Promise<Order> {
-    return this.updateTripStatus(orderId, status, note);
-  },
-  startTrip(driverId: string) {
-    return this.startDriverTrip(driverId);
-  },
-  stopTrip(driverId: string) {
-    return this.stopDriverTrip(driverId);
-  },
-
   // ==================== TRACKING ====================
-  async trackTrip(tokenOrCode: string): Promise<PublicTrackingResponse> {
-    const res = await fetch(`/api/trips/track/${encodeURIComponent(tokenOrCode)}`);
+  async trackTrip(trackingToken: string): Promise<PublicTrackingResponse> {
+    const res = await fetch(`/api/public/tracking/${encodeURIComponent(trackingToken)}`);
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.error?.message || 'Tracking information not found or link has expired');
     }
     return res.json();
-  },
-
-  trackOrder(tokenOrCode: string): Promise<PublicTrackingResponse> {
-    return this.trackTrip(tokenOrCode);
   },
 
   // ==================== TELEMETRY & GPS ====================

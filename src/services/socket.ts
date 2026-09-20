@@ -30,18 +30,9 @@ export function joinCompanyRoom(companyId: string): void {
   s.emit('join:company', { companyId, token: token || undefined });
 }
 
-export function joinTripRoom(trackingTokenOrId: string): void {
+export function joinTripRoom(trackingToken: string): void {
   const s = getSocket();
-  const token = getStoredToken();
-  s.emit('join:trip', {
-    trackingToken: trackingTokenOrId,
-    tripId: trackingTokenOrId,
-    token: token || undefined,
-  });
-}
-
-export function joinOrderRoom(orderId: string): void {
-  joinTripRoom(orderId);
+  s.emit('join:trip', { trackingToken });
 }
 
 export function joinDriverRoom(driverId: string): void {

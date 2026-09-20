@@ -1,7 +1,6 @@
 import { calculateRoadRoute, RouteResult, haversineKm } from './routing';
 
 export interface EtaCalculationInput {
-  orderId?: string;
   tripId?: string;
   driverLocation?: { lat: number; lng: number; speed: number; heading?: number };
   destinationCoords: { lat: number; lng: number };
@@ -38,7 +37,7 @@ const THROTTLE_MIN_INTERVAL_MS = 1000 * 15; // 15 seconds minimum between full r
  * 4. Exponential smoothing filter against previous ETA to prevent wild fluctuations
  */
 export async function calculateDynamicEta(params: EtaCalculationInput): Promise<EtaCalculationResult> {
-  const tripKey = params.tripId || params.orderId || 'default-trip';
+  const tripKey = params.tripId || 'default-trip';
   const { driverLocation, destinationCoords } = params;
 
   if (!driverLocation) {

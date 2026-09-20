@@ -1,6 +1,6 @@
 import React, { useEffect, useRef } from 'react';
 import L from 'leaflet';
-import { Driver, Trip, Order } from '../types';
+import { Driver, Trip } from '../types';
 import { JBEIL_BOUNDS } from '../data/jbeilData';
 
 interface MapComponentProps {
@@ -8,9 +8,7 @@ interface MapComponentProps {
   selectedDriverId?: string;
   onSelectDriver?: (driver: Driver) => void;
   trips?: Trip[];
-  orders?: Order[];
-  activeTrip?: Trip | null;
-  activeOrder?: Order | null;
+  currentTrip?: Trip | null;
   focusLocation?: { lat: number; lng: number } | null;
   followDriver?: boolean;
   userPosition?: { lat: number; lng: number; heading?: number } | null;
@@ -24,10 +22,8 @@ export const MapComponent: React.FC<MapComponentProps> = ({
   drivers = [],
   selectedDriverId,
   onSelectDriver,
-  trips,
-  orders = [],
-  activeTrip,
-  activeOrder,
+  trips = [],
+  currentTrip,
   focusLocation,
   followDriver = false,
   userPosition,
@@ -41,8 +37,8 @@ export const MapComponent: React.FC<MapComponentProps> = ({
   const markersLayerRef = useRef<L.LayerGroup | null>(null);
   const routeLayerRef = useRef<L.Polyline | null>(null);
 
-  const displayedTrips = trips || orders || [];
-  const currentActiveTrip = activeTrip || activeOrder;
+  const displayedTrips = trips;
+  const currentTripToRender = currentTrip;
 
   // Initialize Map & ResizeObserver
   useEffect(() => {
@@ -134,17 +130,17 @@ export const MapComponent: React.FC<MapComponentProps> = ({
       } catch {
         // ignore bounds fit error
       }
-    } else if (currentActiveTrip && currentActiveTrip.pickupCoords && currentActiveTrip.dropoffCoords) {
+    } else if (currentTripToRender && currentTripToRender.pickupCoords && currentTripToRender.dropoffCoords) {
       const waypoints: [number, number][] = [
-        [currentActiveTrip.pickupCoords.lat, currentActiveTrip.pickupCoords.lng],
+        [currentTripToRender.pickupCoords.lat, currentTripToRender.pickupCoords.lng],
       ];
-      if (currentActiveTrip.assignedDriverId) {
-        const assignedDriver = drivers.find((d) => d.id === currentActiveTrip.assignedDriverId);
+      if (currentTripToRender.assignedDriverId) {
+        const assignedDriver = drivers.find((d) => d.id === currentTripToRender.assignedDriverId);
         if (assignedDriver) {
           waypoints.unshift([assignedDriver.currentLocation.lat, assignedDriver.currentLocation.lng]);
         }
       }
-      waypoints.push([currentActiveTrip.dropoffCoords.lat, currentActiveTrip.dropoffCoords.lng]);
+      waypoints.push([currentTripToRender.dropoffCoords.lat, currentTripToRender.dropoffCoords.lng]);
 
       routeLayerRef.current = L.polyline(waypoints, {
         color: '#3b82f6',
@@ -221,7 +217,7 @@ export const MapComponent: React.FC<MapComponentProps> = ({
           <div class="text-[#94a3b8] text-xs">
             <div class="text-[10px] font-semibold text-[#22c55e] uppercase">Dorm Pickup</div>
             <div class="text-sm font-medium text-white mt-0.5">${trip.pickupAddress}</div>
-            <div class="text-slate-400 mt-1">Student: ${trip.studentName || trip.customerName || 'Student'}</div>
+            <div class="text-slate-400 mt-1">Student: ${trip.studentName || 'Student'}</div>
           </div>
         `);
 

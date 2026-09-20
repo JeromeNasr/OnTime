@@ -11,7 +11,7 @@ import {
   WifiOff,
   UserCheck,
 } from 'lucide-react';
-import { Driver, Order, Network, TripLog } from './types';
+import { Driver, Trip, TripStatus, Network, TripLog } from './types';
 import { DriverPhoneView } from './components/DriverPhoneView';
 import { LeadDriverDispatchView } from './components/LeadDriverDispatchView';
 import { StudentTrackingView } from './components/StudentTrackingView';
@@ -20,7 +20,7 @@ import { NetworkSwitcherModal } from './components/NetworkSwitcherModal';
 import { TripHistoryModal } from './components/TripHistoryModal';
 import { MapComponent } from './components/MapComponent';
 import { getSocket, joinCompanyRoom, joinDriverRoom } from './services/socket';
-import { api } from './services/api';
+import { api, getHeaders, getStoredToken } from './services/api';
 
 export default function App() {
   // Navigation tabs: Driver Phone, Lead Dispatcher, Customer Live Tracking, Fleet Dashboard
@@ -46,7 +46,7 @@ export default function App() {
 
   const [drivers, setDrivers] = useState<Driver[]>([]);
   const [currentDriverId, setCurrentDriverId] = useState<string>('drv-jbeil-1');
-  const [orders, setOrders] = useState<Order[]>([]);
+  const [trips, setTrips] = useState<Trip[]>([]);
   const [tripLogs, setTripLogs] = useState<TripLog[]>([]);
   const [socketConnected, setSocketConnected] = useState<boolean>(false);
 
@@ -78,11 +78,12 @@ export default function App() {
   // 2. Fetch all initial data
   const fetchAllData = useCallback(async () => {
     try {
+      const headers = getHeaders();
       const [netRes, drvRes, ordRes, tripRes] = await Promise.all([
         fetch('/api/networks').catch(() => null),
-        fetch(`/api/drivers?networkCode=${currentNetwork.code}`).catch(() => null),
-        fetch(`/api/orders?networkCode=${currentNetwork.code}`).catch(() => null),
-        fetch(`/api/trips?networkCode=${currentNetwork.code}`).catch(() => null),
+        fetch(`/api/drivers?networkCode=${currentNetwork.code}`, { headers }).catch(() => null),
+        fetch(`/api/trips?networkCode=${currentNetwork.code}`, { headers }).catch(() => null),
+        fetch(`/api/trips/history?networkCode=${currentNetwork.code}`, { headers }).catch(() => null),
       ]);
 
       if (netRes && netRes.ok) {
@@ -101,8 +102,8 @@ export default function App() {
       }
 
       if (ordRes && ordRes.ok) {
-        const ordData = await ordRes.json();
-        setOrders(ordData);
+        const tripData = await ordRes.json();
+        setTrips(tripData);
       }
 
       if (tripRes && tripRes.ok) {
@@ -115,8 +116,18 @@ export default function App() {
   }, [currentNetwork.code, currentDriverId]);
 
   useEffect(() => {
-    fetchAllData();
-  }, [fetchAllData]);
+    async function initAuthAndFetch() {
+      if (!getStoredToken()) {
+        try {
+          await api.loginDemo('OWNER', currentNetwork.code);
+        } catch (err) {
+          console.warn('Initial demo auth failed:', err);
+        }
+      }
+      fetchAllData();
+    }
+    initAuthAndFetch();
+  }, [fetchAllData, currentNetwork.code]);
 
   // 3. Socket.IO Real-time Connection & Event Listeners
   useEffect(() => {
@@ -156,33 +167,31 @@ export default function App() {
       });
     };
 
-    // Order events
-    const onTripCreated = (newTrip: Order) => {
-      setOrders((prev) => {
-        if (prev.some((o) => o.id === newTrip.id)) return prev;
+    // Trip events
+    const onTripCreated = (newTrip: Trip) => {
+      setTrips((prev) => {
+        if (prev.some((t) => t.id === newTrip.id)) return prev;
         return [newTrip, ...prev];
       });
     };
 
-    const onTripAssigned = (data: { order?: Order; trip?: Order; driverId: string }) => {
-      const trip = data.trip || data.order;
-      if (!trip) return;
-      setOrders((prev) =>
-        prev.map((o) => (o.id === trip.id ? trip : o))
+    const onTripAssigned = (data: { trip: Trip; driverId: string }) => {
+      if (!data.trip) return;
+      setTrips((prev) =>
+        prev.map((t) => (t.id === data.trip.id ? data.trip : t))
       );
     };
 
-    const onTripStatusChanged = (data: { orderId?: string; tripId?: string; status: Order['status'] }) => {
-      const targetId = data.tripId || data.orderId;
-      setOrders((prev) =>
-        prev.map((o) => (o.id === targetId ? { ...o, status: data.status } : o))
+    const onTripStatusChanged = (data: { tripId: string; status: TripStatus }) => {
+      setTrips((prev) =>
+        prev.map((t) => (t.id === data.tripId ? { ...t, status: data.status } : t))
       );
     };
 
-    const onTripUpdated = (updatedTrip: Order) => {
-      setOrders((prev) =>
-        prev.some((o) => o.id === updatedTrip.id)
-          ? prev.map((o) => (o.id === updatedTrip.id ? updatedTrip : o))
+    const onTripUpdated = (updatedTrip: Trip) => {
+      setTrips((prev) =>
+        prev.some((t) => t.id === updatedTrip.id)
+          ? prev.map((t) => (t.id === updatedTrip.id ? updatedTrip : t))
           : [updatedTrip, ...prev]
       );
     };
@@ -190,13 +199,9 @@ export default function App() {
     socket.on('driver:location', onDriverLocation);
     socket.on('driver:joined', onDriverJoined);
     socket.on('trip:created', onTripCreated);
-    socket.on('order:created', onTripCreated);
     socket.on('trip:assigned', onTripAssigned);
-    socket.on('order:assigned', onTripAssigned);
     socket.on('trip:status_changed', onTripStatusChanged);
-    socket.on('order:status_changed', onTripStatusChanged);
     socket.on('trip:updated', onTripUpdated);
-    socket.on('order:updated', onTripUpdated);
 
     return () => {
       socket.off('connect', onConnect);
@@ -204,13 +209,9 @@ export default function App() {
       socket.off('driver:location', onDriverLocation);
       socket.off('driver:joined', onDriverJoined);
       socket.off('trip:created', onTripCreated);
-      socket.off('order:created', onTripCreated);
       socket.off('trip:assigned', onTripAssigned);
-      socket.off('order:assigned', onTripAssigned);
       socket.off('trip:status_changed', onTripStatusChanged);
-      socket.off('order:status_changed', onTripStatusChanged);
       socket.off('trip:updated', onTripUpdated);
-      socket.off('order:updated', onTripUpdated);
     };
   }, [currentNetwork.id, currentNetwork.code, currentDriverId]);
 
@@ -219,17 +220,18 @@ export default function App() {
     if (socketConnected) return;
 
     const interval = setInterval(() => {
-      fetch(`/api/drivers?networkCode=${currentNetwork.code}`)
+      const headers = getHeaders();
+      fetch(`/api/drivers?networkCode=${currentNetwork.code}`, { headers })
         .then((res) => res.json())
         .then((data) => {
           if (Array.isArray(data)) setDrivers(data);
         })
         .catch(() => {});
 
-      fetch(`/api/orders?networkCode=${currentNetwork.code}`)
+      fetch(`/api/trips?networkCode=${currentNetwork.code}`, { headers })
         .then((res) => res.json())
         .then((data) => {
-          if (Array.isArray(data)) setOrders(data);
+          if (Array.isArray(data)) setTrips(data);
         })
         .catch(() => {});
     }, 6000);
@@ -261,13 +263,15 @@ export default function App() {
       rating: 4.95,
     };
 
-  // Active order for current driver
-  const activeOrderForCurrentDriver = orders.find(
-    (o) =>
-      o.assignedDriverId === currentDriver.id &&
-      o.status.toUpperCase() !== 'DELIVERED' &&
-      o.status.toUpperCase() !== 'CANCELLED'
-  );
+  // Canonical current trip for current driver
+  const currentTripForDriver =
+    (currentDriver.currentTripId ? trips.find((t) => t.id === currentDriver.currentTripId) : null) ||
+    trips.find(
+      (t) =>
+        t.assignedDriverId === currentDriver.id &&
+        t.status.toUpperCase() !== 'COMPLETED' &&
+        t.status.toUpperCase() !== 'CANCELLED'
+    ) || null;
 
   // Location handler from Driver Phone Cockpit
   const handleUpdateLocation = async (loc: {
@@ -308,12 +312,12 @@ export default function App() {
 
   const handleStartTrip = async () => {
     try {
-      const res = await fetch(`/api/drivers/${currentDriver.id}/trip/start`, { method: 'POST' });
+      const res = await fetch(`/api/drivers/${currentDriver.id}/trip/start`, {
+        method: 'POST',
+        headers: getHeaders(),
+      });
       if (res.ok) {
-        const data = await res.json();
-        setDrivers((prev) =>
-          prev.map((d) => (d.id === currentDriver.id ? { ...d, activeTrip: data.activeTrip } : d))
-        );
+        fetchAllData();
       }
     } catch (err) {
       console.error(err);
@@ -322,7 +326,10 @@ export default function App() {
 
   const handleEndTrip = async () => {
     try {
-      const res = await fetch(`/api/drivers/${currentDriver.id}/trip/stop`, { method: 'POST' });
+      const res = await fetch(`/api/drivers/${currentDriver.id}/trip/stop`, {
+        method: 'POST',
+        headers: getHeaders(),
+      });
       if (res.ok) {
         const data = await res.json();
         if (data.completedTrip) {
@@ -335,31 +342,31 @@ export default function App() {
     }
   };
 
-  const handleCreateOrder = async (orderData: Partial<Order>) => {
+  const handleCreateTrip = async (tripData: Partial<Trip>) => {
     try {
-      const newOrder = await api.createOrder({
+      const newTrip = await api.createTrip({
         networkCode: currentNetwork.code,
-        ...orderData,
+        ...tripData,
       });
-      setOrders((prev) => [newOrder, ...prev]);
+      setTrips((prev) => [newTrip, ...prev]);
       fetchAllData();
     } catch (err) {
       console.error(err);
     }
   };
 
-  const handleAssignOrder = async (orderId: string, driverId: string) => {
+  const handleAssignTrip = async (tripId: string, driverId: string) => {
     try {
-      await api.assignOrder(orderId, driverId);
+      await api.assignTrip(tripId, driverId);
       fetchAllData();
     } catch (err) {
       console.error(err);
     }
   };
 
-  const handleUpdateOrderStatus = async (orderId: string, status: Order['status']) => {
+  const handleUpdateTripStatus = async (tripId: string, status: TripStatus) => {
     try {
-      await api.updateOrderStatus(orderId, status);
+      await api.updateTripStatus(tripId, status);
       fetchAllData();
     } catch (err) {
       console.error(err);
@@ -540,11 +547,11 @@ export default function App() {
             <div className="lg:col-span-6">
               <DriverPhoneView
                 currentDriver={currentDriver}
-                activeOrder={activeOrderForCurrentDriver}
+                currentTrip={currentTripForDriver}
                 onUpdateLocation={handleUpdateLocation}
                 onStartTrip={handleStartTrip}
                 onEndTrip={handleEndTrip}
-                onUpdateOrderStatus={handleUpdateOrderStatus}
+                onUpdateTripStatus={handleUpdateTripStatus}
                 onToggleStatus={handleToggleDriverStatus}
               />
             </div>
@@ -554,8 +561,8 @@ export default function App() {
               <MapComponent
                 drivers={[currentDriver]}
                 selectedDriverId={currentDriver.id}
-                activeOrder={activeOrderForCurrentDriver}
-                orders={activeOrderForCurrentDriver ? [activeOrderForCurrentDriver] : []}
+                currentTrip={currentTripForDriver}
+                trips={currentTripForDriver ? [currentTripForDriver] : []}
                 height="100%"
                 followDriver={true}
                 className="w-full h-full"
@@ -571,9 +578,9 @@ export default function App() {
               <LeadDriverDispatchView
                 currentDriver={currentDriver}
                 drivers={drivers}
-                orders={orders}
-                onCreateOrder={handleCreateOrder}
-                onAssignOrder={handleAssignOrder}
+                trips={trips}
+                onCreateTrip={handleCreateTrip}
+                onAssignTrip={handleAssignTrip}
                 onSelectDriverForMap={(drv) => setMapSelectedDriver(drv)}
               />
             </div>
@@ -583,7 +590,7 @@ export default function App() {
               <MapComponent
                 drivers={drivers}
                 selectedDriverId={mapSelectedDriver?.id || currentDriver.id}
-                orders={orders}
+                trips={trips}
                 height="100%"
                 className="w-full h-full"
               />
@@ -603,7 +610,7 @@ export default function App() {
           <CompanyDashboardView
             network={currentNetwork}
             drivers={drivers}
-            orders={orders}
+            trips={trips}
             tripLogs={tripLogs}
             onAddDriver={(driverData) => {
               handleJoinNetwork({

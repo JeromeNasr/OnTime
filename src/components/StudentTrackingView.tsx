@@ -54,7 +54,6 @@ export const StudentTrackingView: React.FC<StudentTrackingViewProps> = ({
 
     const handleEtaUpdate = (payload: {
       tripId?: string;
-      orderId?: string;
       driverLocation?: { lat: number; lng: number; speed: number; heading: number; timestamp: number };
       etaMinutes: number;
       roadDistanceKm: number;
@@ -82,7 +81,7 @@ export const StudentTrackingView: React.FC<StudentTrackingViewProps> = ({
       });
     };
 
-    const handleStatusChanged = (payload: { tripId?: string; orderId?: string; status: TripStatus }) => {
+    const handleStatusChanged = (payload: { tripId?: string; status: TripStatus }) => {
       setTrackingData((prev) => {
         if (!prev) return prev;
         const isFinished = payload.status === 'COMPLETED' || payload.status === 'CANCELLED';
@@ -99,15 +98,11 @@ export const StudentTrackingView: React.FC<StudentTrackingViewProps> = ({
     };
 
     socket.on('trip:eta_update', handleEtaUpdate);
-    socket.on('order:eta_update', handleEtaUpdate);
     socket.on('trip:status_changed', handleStatusChanged);
-    socket.on('order:status_changed', handleStatusChanged);
 
     return () => {
       socket.off('trip:eta_update', handleEtaUpdate);
-      socket.off('order:eta_update', handleEtaUpdate);
       socket.off('trip:status_changed', handleStatusChanged);
-      socket.off('order:status_changed', handleStatusChanged);
     };
   }, []);
 

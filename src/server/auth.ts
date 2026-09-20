@@ -87,6 +87,48 @@ export function requireAuth(req: Request, res: Response, next: NextFunction) {
 }
 
 /**
+ * Strict authentication in production; permits non-production demo fallback if DEMO_MODE enabled
+ */
+export function requireAuthOrDemo(req: Request, res: Response, next: NextFunction) {
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    const token = authHeader.split(' ')[1];
+    const decoded = verifyToken(token);
+    if (decoded) {
+      req.user = decoded;
+      return next();
+    }
+    return res.status(401).json({
+      error: {
+        code: 'INVALID_TOKEN',
+        message: 'Session token has expired or is invalid.',
+      },
+    });
+  }
+
+  // In production (when DEMO_MODE !== 'true'), authentication is strictly mandatory:
+  const isDemo = process.env.DEMO_MODE === 'true' || (process.env.NODE_ENV !== 'production' && process.env.DEMO_MODE !== 'false');
+  if (!isDemo) {
+    return res.status(401).json({
+      error: {
+        code: 'UNAUTHORIZED',
+        message: 'Authentication token required.',
+      },
+    });
+  }
+
+  // Non-production demo fallback: demo owner
+  req.user = {
+    id: 'usr-demo-owner',
+    email: 'owner@byblosfleet.lb',
+    name: 'Demo Dispatcher (Charbel)',
+    role: 'OWNER',
+    companyId: 'comp-byblos-01',
+  };
+  next();
+}
+
+/**
  * Role-Based Access Control (RBAC) middleware
  */
 export function requireRole(allowedRoles: UserRole[]) {
