@@ -12,15 +12,15 @@ import { db } from './src/server/db';
 import {
   generateToken,
   requireAuth,
-  optionalAuth,
   verifyToken,
   AuthUserPayload,
 } from './src/server/auth';
 import { calculateRoadRoute, haversineKm } from './src/server/routing';
 import { calculateDynamicEta, EtaCalculationResult } from './src/server/eta';
-import { DriverLocation, TripStatus, PublicTrackingResponse, StudentTrackingState } from './src/types';
+import { Trip, DriverLocation, TripStatus, PublicTrackingResponse, StudentTrackingState } from './src/types';
 
 async function startServer() {
+  const isDriverRole = (role?: string): boolean => role === 'DRIVER' || role === 'LEAD_DRIVER';
   const app = express();
   const PORT = 3000;
   const httpServer = http.createServer(app);
@@ -114,7 +114,7 @@ async function startServer() {
           socket.emit('error', { code: 'NOT_FOUND', message: 'Trip not found' });
           return;
         }
-        if (user.role === 'DRIVER') {
+        if (isDriverRole(user.role)) {
           const drv = db.getDriverByUserId(user.id);
           if (!drv || trip.assignedDriverId !== drv.id) {
             socket.emit('error', { code: 'FORBIDDEN', message: 'Unauthorized driver trip access' });
@@ -125,6 +125,7 @@ async function startServer() {
           return;
         }
         socket.join(`trip:${trip.id}`);
+        socket.emit('joined:trip', { tripId: trip.id });
         return;
       }
 
@@ -153,6 +154,7 @@ async function startServer() {
 
       // Join ONLY canonical trip room
       socket.join(`trip:${trip.id}`);
+      socket.emit('joined:trip', { tripId: trip.id });
     };
 
     socket.on('join:trip', handleJoinTrip);
@@ -163,7 +165,7 @@ async function startServer() {
       if (typeof payload === 'object' && payload?.token) {
         const user = verifyToken(payload.token);
         if (user) {
-          if (user.role === 'DRIVER') {
+          if (isDriverRole(user.role)) {
             const drv = db.getDriverByUserId(user.id);
             if (!drv) {
               socket.emit('error', { code: 'FORBIDDEN', message: 'Driver not found' });
@@ -195,15 +197,39 @@ async function startServer() {
       }
     });
 
+    // Public Customer Live Vehicle Map channel
+    socket.on('join:public_fleet', () => {
+      socket.join('public_fleet');
+      // Immediately send current live public vehicles snapshot
+      const snapshot = db.listPublicVehicles();
+      socket.emit('fleet:snapshot', snapshot);
+    });
+
+    socket.on('leave:public_fleet', () => {
+      socket.leave('public_fleet');
+    });
+
     socket.on('disconnect', () => {
       // client disconnected cleanly
     });
   });
 
   // Health check
-  app.get('/api/health', (_req, res) => {
+  app.get('/api/health', async (_req, res) => {
+    const health = await db.checkHealth();
+    if (!health.healthy) {
+      return res.status(503).json({
+        status: 'unhealthy',
+        database: 'disconnected',
+        error: health.error,
+        service: 'ONTime Fleet Tracking Platform',
+        version: '2.0.0-production',
+        time: new Date().toISOString(),
+      });
+    }
     res.json({
       status: 'ok',
+      database: 'connected',
       service: 'ONTime Fleet Tracking Platform',
       version: '2.0.0-production',
       region: 'Jbeil (Byblos) University Dorm Corridor',
@@ -213,7 +239,7 @@ async function startServer() {
 
   // ==================== AUTHENTICATION API ====================
 
-  app.post('/api/auth/register', (req, res) => {
+  app.post('/api/auth/register', async (req, res) => {
     try {
       const { email, password, name, phone, companyName, joinCode, role } = req.body;
 
@@ -366,19 +392,58 @@ async function startServer() {
   // ==================== COMPANIES & NETWORKS ====================
 
   app.get('/api/networks', (_req, res) => {
-    res.json(db.listCompanies());
+    res.json(db.listPublicNetworks());
+  });
+
+  app.get('/api/networks/:code', (req, res) => {
+    const net = db.getNetworkByJoinCode(req.params.code) || db.getCompany(req.params.code);
+    if (!net) {
+      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Fleet network not found' } });
+    }
+    res.json(net);
   });
 
   app.get('/api/companies', (_req, res) => {
     res.json(db.listCompanies());
   });
 
-  app.post('/api/networks', (req, res) => {
+  app.post('/api/networks', async (req, res) => {
+    const { name, ownerName, ownerEmail, phone, leadPhone, joinCode } = req.body;
+    if (!name || !ownerName) {
+      return res.status(400).json({ error: { code: 'INVALID_INPUT', message: 'Network name and owner name required' } });
+    }
+    const cleanJoinCode = joinCode ? String(joinCode).trim().toUpperCase() : String(crypto.randomInt(100000, 999999));
+    const comp = await db.createCompany({
+      code: `NET-${crypto.randomInt(100, 999)}`,
+      name: name.trim(),
+      ownerName: ownerName.trim(),
+      ownerEmail: ownerEmail || `${name.toLowerCase().replace(/[^a-z0-9]/g, '')}@northlebanonfleet.lb`,
+      phone: phone || leadPhone || '+961 70 000 000',
+      leadPhone: leadPhone || phone,
+      joinCode: cleanJoinCode,
+      isPublic: true,
+    });
+    res.status(201).json(comp);
+  });
+
+  app.post('/api/networks/:id/lead', requireAuth, async (req, res) => {
+    const { leadDriverId, leadPhone } = req.body;
+    if (!leadDriverId) {
+      return res.status(400).json({ error: { code: 'INVALID_INPUT', message: 'Lead driver ID required' } });
+    }
+    const updated = await db.updateNetworkLead(req.params.id, leadDriverId, leadPhone);
+    if (!updated) {
+      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Network not found' } });
+    }
+    res.json(updated);
+  });
+
+  app.post('/api/companies', async (req, res) => {
     const { name, ownerName, ownerEmail } = req.body;
     if (!name || !ownerName) {
       return res.status(400).json({ error: { code: 'INVALID_INPUT', message: 'Company name and owner name required' } });
     }
-    const comp = db.createCompany({
+    const comp = await db.createCompany({
       code: `BYB-${crypto.randomInt(100, 999)}`,
       name,
       ownerName,
@@ -387,63 +452,52 @@ async function startServer() {
     res.status(201).json(comp);
   });
 
-  app.post('/api/companies', (req, res) => {
-    const { name, ownerName, ownerEmail } = req.body;
-    if (!name || !ownerName) {
-      return res.status(400).json({ error: { code: 'INVALID_INPUT', message: 'Company name and owner name required' } });
-    }
-    const comp = db.createCompany({
-      code: `BYB-${crypto.randomInt(100, 999)}`,
-      name,
-      ownerName,
-      ownerEmail: ownerEmail || 'owner@ontime.lb',
-    });
-    res.status(201).json(comp);
-  });
-
-  app.get('/api/companies/:id/invites', requireAuth, (req, res) => {
+  app.get('/api/companies/:id/invites', requireAuth, async (req, res) => {
     const comp = db.getCompany(req.params.id);
     if (!comp) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Company not found' } });
     if (req.user!.companyId !== comp.id) {
       return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Cannot generate invites for another company.' } });
     }
-    const invite = db.createInvite(comp.id, 'DRIVER');
+    const invite = await db.createInvite(comp.id, 'DRIVER');
     res.json(invite);
+  });
+
+  // ==================== PUBLIC FLEET TRACKING API ====================
+
+  app.get('/api/public/vehicles', (req, res) => {
+    const networkParam = (req.query.networkIds || req.query.networks) as string | undefined;
+    const networkIds = networkParam ? networkParam.split(',').map((s) => s.trim()).filter(Boolean) : undefined;
+    const vehicles = db.listPublicVehicles(networkIds);
+    res.json(vehicles);
   });
 
   // ==================== DRIVERS & FLEET ====================
 
-  app.get('/api/drivers', optionalAuth, (req, res) => {
-    if (!req.user && process.env.NODE_ENV === 'production' && process.env.DEMO_MODE !== 'true') {
-      return res.status(401).json({ error: { code: 'UNAUTHORIZED', message: 'Authentication required' } });
-    }
+  app.get('/api/drivers', requireAuth, (req, res) => {
     // Strict company isolation: authenticated user's company is strictly authoritative
-    const targetCompany = req.user ? req.user.companyId : (req.query.companyId as string || 'comp-byblos-01');
+    const targetCompany = req.user!.companyId;
     const drivers = db.listDrivers(targetCompany);
     res.json(drivers);
   });
 
-  app.get('/api/drivers/:id', optionalAuth, (req, res) => {
-    if (!req.user && process.env.NODE_ENV === 'production' && process.env.DEMO_MODE !== 'true') {
-      return res.status(401).json({ error: { code: 'UNAUTHORIZED', message: 'Authentication required' } });
-    }
+  app.get('/api/drivers/:id', requireAuth, (req, res) => {
     const driver = db.getDriver(req.params.id);
     if (!driver) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Driver not found' } });
-    if (req.user?.companyId && driver.companyId !== req.user.companyId) {
+    if (driver.companyId !== req.user!.companyId) {
       return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Cannot access driver belonging to another company.' } });
     }
     res.json(driver);
   });
 
-  app.post('/api/drivers/join', (req, res) => {
+  app.post('/api/drivers/join', async (req, res) => {
     const { name, phone, vehicleModel, plateNumber, networkCode, isLeadDriver } = req.body;
     const code = (networkCode || '').toUpperCase();
-    const comp = db.getCompany(code);
+    const comp = db.getNetworkByJoinCode(code) || db.getCompany(code);
     if (!comp) {
       return res.status(404).json({ error: 'Invalid company / network code' });
     }
 
-    const driver = db.createDriver({
+    const driver = await db.createDriver({
       name,
       phone: phone || '+961 70 000 000',
       companyId: comp.id,
@@ -456,6 +510,107 @@ async function startServer() {
     io.to(`company:${comp.id}`).emit('driver:joined', driver);
 
     res.status(201).json(driver);
+  });
+
+  // Driver Join Network using Join Code
+  app.post('/api/driver/join-network', requireAuth, async (req, res) => {
+    let driverId: string | undefined;
+    if (isDriverRole(req.user!.role)) {
+      const drv = db.getDriverByUserId(req.user!.id);
+      driverId = drv ? drv.id : req.user!.id;
+    } else {
+      driverId = req.body.driverId;
+    }
+
+    const { joinCode } = req.body;
+    if (!joinCode) {
+      return res.status(400).json({ error: { code: 'INVALID_INPUT', message: 'Join code is required' } });
+    }
+
+    const network = db.getNetworkByJoinCode(joinCode);
+    if (!network) {
+      return res.status(404).json({ error: { code: 'NETWORK_NOT_FOUND', message: 'No fleet network found with this code' } });
+    }
+
+    const updated = await db.updateDriverNetwork(driverId!, network.id, false);
+    if (!updated) {
+      return res.status(404).json({ error: { code: 'DRIVER_NOT_FOUND', message: 'Driver profile not found' } });
+    }
+
+    io.to(`company:${network.id}`).emit('driver:joined', updated);
+    res.json({ success: true, driver: updated, network });
+  });
+
+  // Driver Toggle Broadcasting (Location Sharing & Speedometer)
+  app.post('/api/driver/broadcasting', requireAuth, async (req, res) => {
+    let driverId: string | undefined;
+    if (isDriverRole(req.user!.role)) {
+      const drv = db.getDriverByUserId(req.user!.id);
+      driverId = drv ? drv.id : req.user!.id;
+    } else {
+      driverId = req.body.driverId;
+    }
+
+    if (!driverId) {
+      return res.status(400).json({ error: { code: 'INVALID_DRIVER', message: 'Driver not found' } });
+    }
+
+    const { locationSharingEnabled, speedometerEnabled } = req.body;
+    const isLocSharing = Boolean(locationSharingEnabled);
+    const speedo = speedometerEnabled !== undefined ? Boolean(speedometerEnabled) : undefined;
+
+    const updated = await db.setDriverBroadcasting(driverId, isLocSharing, speedo);
+    if (!updated) {
+      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Driver not found' } });
+    }
+
+    // Broadcast to public fleet channel
+    if (!isLocSharing) {
+      io.to('public_fleet').emit('vehicle:removed', { driverId: updated.id });
+    } else {
+      const publicVehicles = db.listPublicVehicles();
+      const veh = publicVehicles.find((v) => v.driverId === updated.id);
+      if (veh) {
+        io.to('public_fleet').emit('vehicle:location:update', veh);
+      }
+    }
+
+    io.to(`company:${updated.companyId}`).emit('driver:broadcasting_changed', {
+      driverId: updated.id,
+      locationSharingEnabled: updated.locationSharingEnabled,
+      speedometerEnabled: updated.speedometerEnabled,
+    });
+
+    res.json(updated);
+  });
+
+  // Driver Leave Current Network
+  app.post('/api/driver/leave-network', requireAuth, async (req, res) => {
+    let driverId: string | undefined;
+    if (isDriverRole(req.user!.role)) {
+      const drv = db.getDriverByUserId(req.user!.id);
+      driverId = drv ? drv.id : req.user!.id;
+    } else {
+      driverId = req.body.driverId;
+    }
+
+    if (!driverId) {
+      return res.status(400).json({ error: { code: 'INVALID_DRIVER', message: 'Driver not found' } });
+    }
+
+    const driver = db.getDriver(driverId);
+    if (!driver) {
+      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Driver not found' } });
+    }
+
+    const oldCompId = driver.companyId;
+    await db.removeDriverFromNetwork(driverId);
+    io.to('public_fleet').emit('vehicle:removed', { driverId });
+    if (oldCompId) {
+      io.to(`company:${oldCompId}`).emit('driver:left', { driverId });
+    }
+
+    res.json({ success: true, message: 'Disconnected from fleet network' });
   });
 
   // In-memory rate limiting map for public tracking endpoint (max 80 requests/minute per client)
@@ -497,35 +652,50 @@ async function startServer() {
 
     const targetDriverId = (req.params.id || bodyDriverId) as string | undefined;
 
-    const isProdStrict = process.env.NODE_ENV === 'production' && process.env.DEMO_MODE !== 'true';
-
     // Driver authorization: driver can ONLY update their own vehicle telemetry
     let driverId = targetDriverId;
-    if (req.user?.role === 'DRIVER') {
-      const drv = db.getDriverByUserId(req.user.id);
-      const authorizedDriverId = drv ? drv.id : req.user.id;
+    if (isDriverRole(req.user!.role)) {
+      const drv = db.getDriverByUserId(req.user!.id);
+      const authorizedDriverId = drv ? drv.id : req.user!.id;
       if (targetDriverId && targetDriverId !== authorizedDriverId) {
         return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Drivers can only report location for their own vehicle' } });
       }
       driverId = authorizedDriverId;
-    } else if (req.user?.role === 'DISPATCHER' || req.user?.role === 'OWNER') {
+    } else if (req.user!.role === 'DISPATCHER' || req.user!.role === 'OWNER') {
       if (!driverId) {
         return res.status(400).json({ error: { code: 'MISSING_DRIVER_ID', message: 'Driver ID required for administrative telemetry' } });
       }
       const targetDriver = db.getDriver(driverId);
-      if (!targetDriver || targetDriver.companyId !== req.user.companyId) {
+      if (!targetDriver || targetDriver.companyId !== req.user!.companyId) {
         return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Cannot report telemetry for driver belonging to another company' } });
       }
-    } else if (isProdStrict && !req.user) {
-      return res.status(401).json({ error: { code: 'UNAUTHORIZED', message: 'Driver authentication required in production mode' } });
     }
 
-    if (isSimulated && isProdStrict) {
+    if (isSimulated && process.env.NODE_ENV === 'production' && process.env.DEMO_MODE !== 'true') {
       return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Simulated GPS telemetry is rejected in production' } });
     }
 
     if (!driverId) {
       return res.status(400).json({ error: { code: 'INVALID_DRIVER', message: 'Driver identifier required' } });
+    }
+
+    const existingDriver = db.getDriver(driverId);
+    if (!existingDriver) {
+      return res.status(404).json({ error: { code: 'DRIVER_NOT_FOUND', message: 'Driver not found' } });
+    }
+
+    // Reject telemetry if associated trip is completed or cancelled
+    const targetTripId = (req.body.tripId || existingDriver.currentTripId) as string | undefined;
+    if (targetTripId) {
+      const associatedTrip = db.getTrip(targetTripId);
+      if (associatedTrip && (associatedTrip.status === 'COMPLETED' || associatedTrip.status === 'CANCELLED')) {
+        return res.status(400).json({
+          error: {
+            code: 'TRIP_TERMINATED',
+            message: `Cannot submit telemetry for a ${associatedTrip.status.toLowerCase()} trip.`,
+          },
+        });
+      }
     }
 
     const numLat = Number(lat);
@@ -552,8 +722,7 @@ async function startServer() {
     }
 
     // Check impossible speed / teleportation against previous ping
-    const existingDriver = db.getDriver(driverId);
-    if (existingDriver && existingDriver.currentLocation && existingDriver.currentLocation.timestamp > 0 && !isSimulated) {
+    if (existingDriver.currentLocation && existingDriver.currentLocation.timestamp > 0 && !isSimulated) {
       const timeDeltaSec = (now - existingDriver.currentLocation.timestamp) / 1000;
       if (timeDeltaSec > 0 && timeDeltaSec < 120) {
         const distKm = haversineKm(
@@ -570,92 +739,151 @@ async function startServer() {
       }
     }
 
-    // Clamp speed to realistic max 150 km/h
-    const cleanSpeed = Math.min(150, Math.max(0, rawSpeed || 0));
-
-    const updated = db.updateDriverLocation(driverId, {
-      lat: numLat,
-      lng: numLng,
-      speed: cleanSpeed,
-      heading: Number(heading) || 0,
-      accuracy: Math.min(200, Number(accuracy) || 5),
-      timestamp: pingTimestamp,
-      batteryLevel: batteryLevel !== undefined ? Number(batteryLevel) : undefined,
-      networkStatus,
-      isSimulated: Boolean(isSimulated),
-    });
-
-    if (!updated) {
-      return res.status(404).json({ error: { code: 'DRIVER_NOT_FOUND', message: 'Driver not found' } });
-    }
-
-    // 1. Broadcast to Company Room in real-time
-    io.to(`company:${updated.companyId || updated.networkCode}`).emit('driver:location', {
-      driverId: updated.id,
-      location: updated.currentLocation,
-      status: updated.status,
-    });
-
-    // 2. If driver is on an active trip, compute dynamic ETA and broadcast to canonical trip room
-    const activeTripId = updated.currentTripId;
-    if (activeTripId) {
-      const trip = db.getTrip(activeTripId);
-      if (trip && trip.dropoffCoords) {
-        try {
-          const etaResult = await calculateDynamicEta({
-            tripId: trip.id,
-            driverLocation: updated.currentLocation,
-            destinationCoords: (trip.status === 'EN_ROUTE_PICKUP' || trip.status === 'AT_PICKUP') ? trip.pickupCoords : trip.dropoffCoords,
-          });
-
-          trip.estimatedMinutes = etaResult.etaMinutes;
-          trip.roadDistanceKm = etaResult.roadDistanceKm;
-
-          const etaPayload = {
-            tripId: trip.id,
-            driverLocation: updated.currentLocation,
-            etaMinutes: etaResult.etaMinutes,
-            roadDistanceKm: etaResult.roadDistanceKm,
-            polyline: etaResult.polyline,
-            trafficLevel: etaResult.trafficLevel,
-            trafficSource: etaResult.trafficAssessmentBasis,
-          };
-
-          io.to(`trip:${trip.id}`).emit('trip:eta_update', etaPayload);
-          io.to(`trip:${trip.id}`).emit('driver:location', { driverId: updated.id, location: updated.currentLocation });
-        } catch (err) {
-          console.warn('Live ETA calculation error:', err);
-        }
+    // Clamp speed to realistic max 150 km/h, and calculate if missing/zero
+    let cleanSpeed = rawSpeed;
+    let isCalculatedSpeed = false;
+    if ((isNaN(rawSpeed) || rawSpeed <= 0) && existingDriver.currentLocation && existingDriver.currentLocation.timestamp > 0) {
+      const timeDeltaSec = (pingTimestamp - existingDriver.currentLocation.timestamp) / 1000;
+      if (timeDeltaSec >= 1 && timeDeltaSec <= 120) {
+        const distKm = haversineKm(
+          existingDriver.currentLocation.lat,
+          existingDriver.currentLocation.lng,
+          numLat,
+          numLng
+        );
+        cleanSpeed = distKm / (timeDeltaSec / 3600);
+        isCalculatedSpeed = true;
       }
     }
+    cleanSpeed = Math.min(150, Math.max(0, cleanSpeed || 0));
 
-    res.json({ success: true, driverId, location: updated.currentLocation });
+    try {
+      const updated = await db.updateDriverLocation(driverId, {
+        lat: numLat,
+        lng: numLng,
+        speed: cleanSpeed,
+        heading: Number(heading) || 0,
+        accuracy: Math.min(200, Number(accuracy) || 5),
+        timestamp: pingTimestamp,
+        batteryLevel: batteryLevel !== undefined ? Number(batteryLevel) : undefined,
+        networkStatus,
+        isSimulated: Boolean(isSimulated),
+        isCalculatedSpeed,
+      } as any);
+
+      if (!updated) {
+        return res.status(404).json({ error: { code: 'DRIVER_NOT_FOUND', message: 'Driver not found' } });
+      }
+
+      // 1. Broadcast to Company Room in real-time
+      io.to(`company:${updated.companyId || updated.networkCode}`).emit('driver:location', {
+        driverId: updated.id,
+        location: updated.currentLocation,
+        status: updated.status,
+      });
+
+      // 2. Broadcast to Public Fleet Map channel if location sharing is enabled
+      if (updated.locationSharingEnabled !== false) {
+        const comp = updated.companyId ? db.getCompany(updated.companyId) : null;
+        const vehicle = updated.vehicleId ? db.getVehicle(updated.vehicleId) : null;
+        const speedDisplay = (updated.speedometerEnabled !== false) ? Math.round(updated.currentLocation.speed || 0) : 0;
+
+        const publicVehicleItem = {
+          id: `veh-${updated.id}`,
+          driverId: updated.id,
+          driverName: updated.name,
+          phone: comp?.settings?.enablePublicDriverPhone !== false ? updated.phone : undefined,
+          networkId: updated.companyId,
+          networkCode: updated.networkCode,
+          networkName: updated.networkName || comp?.name || updated.networkCode,
+          leadDriverName: comp?.ownerName,
+          leadPhone: comp?.leadPhone || comp?.phone,
+          vehicleModel: vehicle?.makeModel || updated.vehicleModel || 'Taxi Sedan',
+          plateNumber: vehicle?.plateNumber || updated.plateNumber || 'Public Taxi',
+          status: 'ONLINE',
+          location: {
+            lat: updated.currentLocation.lat,
+            lng: updated.currentLocation.lng,
+            speed: speedDisplay,
+            heading: updated.currentLocation.heading || 0,
+            accuracy: updated.currentLocation.accuracy || 5,
+            timestamp: updated.currentLocation.timestamp,
+            isCalculatedSpeed: isCalculatedSpeed || updated.currentLocation.isCalculatedSpeed,
+            freshness: 'FRESH',
+          },
+          locationSharingEnabled: true,
+        };
+        io.to('public_fleet').emit('vehicle:location:update', publicVehicleItem);
+      } else {
+        io.to('public_fleet').emit('vehicle:removed', { driverId: updated.id });
+      }
+
+      // 3. If driver is on an active trip, compute dynamic ETA and broadcast to canonical trip room
+      const activeTripId = updated.currentTripId || (req.body.tripId ? db.getTrip(req.body.tripId)?.id : undefined);
+      if (activeTripId) {
+        const trip = db.getTrip(activeTripId);
+        if (trip) {
+          io.to(`trip:${trip.id}`).emit('driver:location', { driverId: updated.id, location: updated.currentLocation });
+          io.to(`trip:${trip.id}`).emit('driver:location_updated', { driverId: updated.id, location: updated.currentLocation });
+
+          if (trip.dropoffCoords) {
+            try {
+              const etaResult = await calculateDynamicEta({
+                tripId: trip.id,
+                driverLocation: updated.currentLocation,
+                destinationCoords: (trip.status === 'EN_ROUTE_PICKUP' || trip.status === 'AT_PICKUP') ? trip.pickupCoords : trip.dropoffCoords,
+              });
+
+              trip.estimatedMinutes = etaResult.etaMinutes;
+              trip.roadDistanceKm = etaResult.roadDistanceKm;
+
+              const etaPayload = {
+                tripId: trip.id,
+                driverLocation: updated.currentLocation,
+                etaMinutes: etaResult.etaMinutes,
+                roadDistanceKm: etaResult.roadDistanceKm,
+                polyline: etaResult.polyline,
+                trafficLevel: etaResult.trafficLevel,
+                trafficSource: etaResult.trafficAssessmentBasis,
+              };
+
+              io.to(`trip:${trip.id}`).emit('trip:eta_update', etaPayload);
+            } catch (err) {
+              console.warn('Live ETA calculation error:', err);
+            }
+          }
+        }
+      }
+
+      res.json({ success: true, driverId, location: updated.currentLocation });
+    } catch (err) {
+      console.error('Failed to update driver location in database:', err);
+      return res.status(500).json({ error: { code: 'DATABASE_ERROR', message: 'Failed to record driver telemetry due to database error' } });
+    }
   };
 
-  app.post('/api/telemetry', optionalAuth, telemetryHandler);
-  app.post('/api/drivers/:id/location', optionalAuth, telemetryHandler);
+  app.post('/api/telemetry', requireAuth, telemetryHandler);
+  app.post('/api/drivers/:id/location', requireAuth, telemetryHandler);
 
   // Offline Sync: Batch telemetry upload on reconnection
-  app.post('/api/telemetry/batch', optionalAuth, (req, res) => {
+  app.post('/api/telemetry/batch', requireAuth, async (req, res) => {
     const { driverId: reqDriverId, points } = req.body;
     let driverId = reqDriverId;
-    if (req.user?.role === 'DRIVER') {
-      const drv = db.getDriverByUserId(req.user.id);
-      const authorizedDriverId = drv ? drv.id : req.user.id;
+    if (isDriverRole(req.user!.role)) {
+      const drv = db.getDriverByUserId(req.user!.id);
+      const authorizedDriverId = drv ? drv.id : req.user!.id;
       if (reqDriverId && reqDriverId !== authorizedDriverId) {
         return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Unauthorized driver telemetry batch' } });
       }
       driverId = authorizedDriverId;
-    } else if (req.user?.role === 'DISPATCHER' || req.user?.role === 'OWNER') {
+    } else if (req.user!.role === 'DISPATCHER' || req.user!.role === 'OWNER') {
       if (!driverId) {
         return res.status(400).json({ error: { code: 'MISSING_DRIVER_ID', message: 'Driver ID required for administrative batch' } });
       }
       const targetDriver = db.getDriver(driverId);
-      if (!targetDriver || targetDriver.companyId !== req.user.companyId) {
+      if (!targetDriver || targetDriver.companyId !== req.user!.companyId) {
         return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Cannot upload telemetry for driver belonging to another company' } });
       }
-    } else if (process.env.NODE_ENV === 'production' && process.env.DEMO_MODE !== 'true') {
-      return res.status(401).json({ error: { code: 'UNAUTHORIZED', message: 'Authentication required for telemetry batch' } });
     }
 
     if (!driverId || !Array.isArray(points)) {
@@ -692,28 +920,37 @@ async function startServer() {
     }
 
     validPoints.sort((a, b) => a.timestamp - b.timestamp);
-    validPoints.forEach((pt: DriverLocation) => {
-      db.updateDriverLocation(driverId, pt);
-    });
-
-    res.json({ success: true, syncedCount: validPoints.length });
+    try {
+      for (const pt of validPoints) {
+        const ptTripId = (pt as any).tripId || driver.currentTripId;
+        if (ptTripId) {
+          const t = db.getTrip(ptTripId);
+          if (t && (t.status === 'COMPLETED' || t.status === 'CANCELLED')) {
+            continue;
+          }
+        }
+        await db.updateDriverLocation(driverId, pt);
+      }
+      res.json({ success: true, syncedCount: validPoints.length });
+    } catch (err) {
+      console.error('Failed to sync batch telemetry in database:', err);
+      return res.status(500).json({ error: { code: 'DATABASE_ERROR', message: 'Failed to record batch telemetry due to database error' } });
+    }
   });
 
   // ==================== TRIPS ====================
 
-  app.post('/api/drivers/:id/trip/start', optionalAuth, async (req, res) => {
+  app.post('/api/drivers/:id/trip/start', requireAuth, async (req, res) => {
     const driver = db.getDriver(req.params.id);
     if (!driver) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Driver not found' } });
 
-    if (req.user?.role === 'DRIVER') {
-      const drv = db.getDriverByUserId(req.user.id);
+    if (isDriverRole(req.user!.role)) {
+      const drv = db.getDriverByUserId(req.user!.id);
       if (drv && drv.id !== driver.id) {
         return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Cannot start trip for another driver' } });
       }
-    } else if (req.user?.companyId && driver.companyId !== req.user.companyId) {
+    } else if (driver.companyId !== req.user!.companyId) {
       return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Cannot start trip for driver in another company' } });
-    } else if (process.env.NODE_ENV === 'production' && process.env.DEMO_MODE !== 'true' && !req.user) {
-      return res.status(401).json({ error: { code: 'UNAUTHORIZED', message: 'Authentication required' } });
     }
 
     // Connect to canonical trip assigned to this driver
@@ -740,36 +977,39 @@ async function startServer() {
       });
     }
 
-    if (canonicalTrip.status === 'CREATED' || canonicalTrip.status === 'ASSIGNED') {
-      await db.updateTripStatus(canonicalTrip.id, 'EN_ROUTE_PICKUP', 'Driver started trip towards campus dorm pickup');
-      const payload = { tripId: canonicalTrip.id, status: 'EN_ROUTE_PICKUP', timestamp: Date.now() };
-      io.to(`trip:${canonicalTrip.id}`).emit('trip:status_changed', payload);
+    try {
+      if (canonicalTrip.status === 'CREATED' || canonicalTrip.status === 'ASSIGNED') {
+        await db.updateTripStatus(canonicalTrip.id, 'EN_ROUTE_PICKUP', 'Driver started trip towards campus dorm pickup');
+        const payload = { tripId: canonicalTrip.id, status: 'EN_ROUTE_PICKUP', timestamp: Date.now() };
+        io.to(`trip:${canonicalTrip.id}`).emit('trip:status_changed', payload);
+      }
+
+      io.to(`company:${driver.companyId || driver.networkCode}`).emit('trip:started', {
+        driverId: driver.id,
+        tripId: canonicalTrip.id,
+      });
+      io.to(`company:${driver.companyId || driver.networkCode}`).emit('trip:updated', canonicalTrip);
+
+      res.json({ success: true, trip: canonicalTrip });
+    } catch (err) {
+      console.error('Failed to start trip in database:', err);
+      return res.status(500).json({ error: { code: 'DATABASE_ERROR', message: 'Failed to start trip due to database error' } });
     }
-
-    io.to(`company:${driver.companyId || driver.networkCode}`).emit('trip:started', {
-      driverId: driver.id,
-      tripId: canonicalTrip.id,
-    });
-    io.to(`company:${driver.companyId || driver.networkCode}`).emit('trip:updated', canonicalTrip);
-
-    res.json({ success: true, trip: canonicalTrip });
   });
 
-  app.post('/api/drivers/:id/trip/stop', optionalAuth, async (req, res) => {
+  app.post('/api/drivers/:id/trip/stop', requireAuth, async (req, res) => {
     const driver = db.getDriver(req.params.id);
     if (!driver) {
       return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Driver not found' } });
     }
 
-    if (req.user?.role === 'DRIVER') {
-      const drv = db.getDriverByUserId(req.user.id);
+    if (isDriverRole(req.user!.role)) {
+      const drv = db.getDriverByUserId(req.user!.id);
       if (drv && drv.id !== driver.id) {
         return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Cannot stop trip for another driver' } });
       }
-    } else if (req.user?.companyId && driver.companyId !== req.user.companyId) {
+    } else if (driver.companyId !== req.user!.companyId) {
       return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Cannot stop trip for driver in another company' } });
-    } else if (process.env.NODE_ENV === 'production' && process.env.DEMO_MODE !== 'true' && !req.user) {
-      return res.status(401).json({ error: { code: 'UNAUTHORIZED', message: 'Authentication required' } });
     }
 
     const assignedTripId = driver.currentTripId;
@@ -790,64 +1030,63 @@ async function startServer() {
     const distanceKm = canonicalTrip.roadDistanceKm || 2.0;
     const avgSpeed = durationMinutes > 0 ? (distanceKm / (durationMinutes / 60)) : 25;
 
-    if (canonicalTrip.status !== 'COMPLETED' && canonicalTrip.status !== 'CANCELLED') {
-      await db.updateTripStatus(canonicalTrip.id, 'COMPLETED', 'Trip completed by driver at destination');
-      const payload = { tripId: canonicalTrip.id, status: 'COMPLETED', timestamp: Date.now() };
-      io.to(`trip:${canonicalTrip.id}`).emit('trip:status_changed', payload);
+    try {
+      if (canonicalTrip.status !== 'COMPLETED' && canonicalTrip.status !== 'CANCELLED') {
+        await db.updateTripStatus(canonicalTrip.id, 'COMPLETED', 'Trip completed by driver at destination');
+        const payload = { tripId: canonicalTrip.id, status: 'COMPLETED', timestamp: Date.now() };
+        io.to(`trip:${canonicalTrip.id}`).emit('trip:status_changed', payload);
+      }
+
+      const completedTrip = await db.saveTripLog({
+        id: `log-${canonicalTrip.id}`,
+        tripId: canonicalTrip.id,
+        driverId: driver.id,
+        driverName: driver.name,
+        companyId: driver.companyId,
+        networkCode: driver.networkCode,
+        vehicleId: driver.vehicleId,
+        startTime,
+        endTime: Date.now(),
+        startAddress: canonicalTrip.pickupAddress,
+        endAddress: canonicalTrip.dropoffAddress,
+        distanceKm: Math.round(distanceKm * 10) / 10,
+        durationMinutes,
+        avgSpeedKmH: Math.round(avgSpeed * 10) / 10,
+        maxSpeedKmH: 45,
+        idleMinutes: Math.round(durationMinutes * 0.15),
+        movingMinutes: Math.round(durationMinutes * 0.85),
+        path: canonicalTrip.routeGeometry || [],
+        status: 'COMPLETED',
+      });
+
+      driver.status = 'AVAILABLE';
+      delete driver.currentTripId;
+
+      io.to(`company:${driver.companyId || driver.networkCode}`).emit('trip:completed', completedTrip);
+      io.to(`company:${driver.companyId || driver.networkCode}`).emit('trip:updated', canonicalTrip);
+
+      res.json({ success: true, completedTrip, trip: canonicalTrip });
+    } catch (err) {
+      console.error('Failed to stop trip in database:', err);
+      return res.status(500).json({ error: { code: 'DATABASE_ERROR', message: 'Failed to stop trip due to database error' } });
     }
-
-    const completedTrip = await db.saveTripLog({
-      id: `log-${canonicalTrip.id}`,
-      tripId: canonicalTrip.id,
-      driverId: driver.id,
-      driverName: driver.name,
-      companyId: driver.companyId,
-      networkCode: driver.networkCode,
-      vehicleId: driver.vehicleId,
-      startTime,
-      endTime: Date.now(),
-      startAddress: canonicalTrip.pickupAddress,
-      endAddress: canonicalTrip.dropoffAddress,
-      distanceKm: Math.round(distanceKm * 10) / 10,
-      durationMinutes,
-      avgSpeedKmH: Math.round(avgSpeed * 10) / 10,
-      maxSpeedKmH: 45,
-      idleMinutes: Math.round(durationMinutes * 0.15),
-      movingMinutes: Math.round(durationMinutes * 0.85),
-      path: canonicalTrip.routeGeometry || [],
-      status: 'COMPLETED',
-    });
-
-    driver.status = 'AVAILABLE';
-    delete driver.currentTripId;
-
-    io.to(`company:${driver.companyId || driver.networkCode}`).emit('trip:completed', completedTrip);
-    io.to(`company:${driver.companyId || driver.networkCode}`).emit('trip:updated', canonicalTrip);
-
-    res.json({ success: true, completedTrip, trip: canonicalTrip });
   });
 
   // Historical completed trip logs
   const listTripHistoryHandler = (req: express.Request, res: express.Response) => {
-    if (!req.user && process.env.NODE_ENV === 'production' && process.env.DEMO_MODE !== 'true') {
-      return res.status(401).json({ error: { code: 'UNAUTHORIZED', message: 'Authentication required' } });
-    }
-    const { driverId, networkCode, companyId } = req.query;
-    const targetComp = req.user ? req.user.companyId : ((companyId || networkCode) as string | undefined || 'comp-byblos-01');
+    const { driverId } = req.query;
+    const targetComp = req.user!.companyId;
     const trips = db.listTripLogs(targetComp, driverId as string | undefined);
     res.json(trips);
   };
 
-  app.get('/api/trips/history', optionalAuth, listTripHistoryHandler);
-  app.get('/api/trip-logs', optionalAuth, listTripHistoryHandler);
+  app.get('/api/trips/history', requireAuth, listTripHistoryHandler);
+  app.get('/api/trip-logs', requireAuth, listTripHistoryHandler);
 
   // ==================== VEHICLES ====================
 
-  app.get('/api/vehicles', optionalAuth, (req, res) => {
-    if (!req.user && process.env.NODE_ENV === 'production' && process.env.DEMO_MODE !== 'true') {
-      return res.status(401).json({ error: { code: 'UNAUTHORIZED', message: 'Authentication required' } });
-    }
-    const companyId = req.user ? req.user.companyId : (req.query.companyId as string || 'comp-byblos-01');
+  app.get('/api/vehicles', requireAuth, (req, res) => {
+    const companyId = req.user!.companyId;
     const vehicles = db.listVehicles(companyId);
     res.json(vehicles);
   });
@@ -855,17 +1094,14 @@ async function startServer() {
   // ==================== TRIPS & DISPATCH ====================
 
   const listTripsHandler = (req: express.Request, res: express.Response) => {
-    if (!req.user && process.env.NODE_ENV === 'production' && process.env.DEMO_MODE !== 'true') {
-      return res.status(401).json({ error: { code: 'UNAUTHORIZED', message: 'Authentication required' } });
-    }
     const { driverId } = req.query;
     // Strict isolation: authenticated user's company is authoritative
-    const targetComp = req.user ? req.user.companyId : 'comp-byblos-01';
+    const targetComp = req.user!.companyId;
     let trips = db.listActiveTrips(targetComp);
 
     // If authenticated user is a driver, only return trips assigned to them
-    if (req.user?.role === 'DRIVER') {
-      const drv = db.getDriverByUserId(req.user.id);
+    if (isDriverRole(req.user!.role)) {
+      const drv = db.getDriverByUserId(req.user!.id);
       if (drv) {
         trips = trips.filter((t) => t.assignedDriverId === drv.id);
       } else {
@@ -878,54 +1114,43 @@ async function startServer() {
   };
 
   const getTripHandler = (req: express.Request, res: express.Response) => {
-    if (!req.user && process.env.NODE_ENV === 'production' && process.env.DEMO_MODE !== 'true') {
-      return res.status(401).json({ error: { code: 'UNAUTHORIZED', message: 'Authentication required' } });
-    }
     const trip = db.getTrip(req.params.id);
     if (!trip) {
       return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Trip not found' } });
     }
     // Company isolation
-    if (req.user?.role === 'DRIVER') {
-      const drv = db.getDriverByUserId(req.user.id);
+    if (isDriverRole(req.user!.role)) {
+      const drv = db.getDriverByUserId(req.user!.id);
       if (!drv || trip.assignedDriverId !== drv.id) {
         return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Access denied: Driver can only view their own assigned trip' } });
       }
-    } else if (req.user?.companyId && trip.companyId !== req.user.companyId) {
+    } else if (trip.companyId !== req.user!.companyId) {
       return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Access denied to trip from another company' } });
     }
     res.json(trip);
   };
 
-  app.get('/api/trips', optionalAuth, listTripsHandler);
-  app.get('/api/trips/:id', optionalAuth, getTripHandler);
+  app.get('/api/trips', requireAuth, listTripsHandler);
+  app.get('/api/trips/:id', requireAuth, getTripHandler);
 
   const createTripHandler = async (req: express.Request, res: express.Response) => {
-    if (!req.user && process.env.NODE_ENV === 'production' && process.env.DEMO_MODE !== 'true') {
-      return res.status(401).json({ error: { code: 'UNAUTHORIZED', message: 'Authentication required to create trips.' } });
-    }
-
-    if (req.user?.role === 'DRIVER') {
+    if (isDriverRole(req.user!.role)) {
       return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Drivers cannot create dispatch trips.' } });
     }
 
     const {
-      networkCode,
-      companyId: reqCompId,
-      customerName,
-      customerPhone,
       studentName,
       studentPhone,
       pickupAddress,
       pickupCoords,
       dropoffAddress,
       dropoffCoords,
-      packageInfo,
+      notes,
       assignedDriverId,
       priority,
     } = req.body;
 
-    const authoritativeCompanyId = req.user ? req.user.companyId : (reqCompId || networkCode || 'comp-byblos-01');
+    const authoritativeCompanyId = req.user!.companyId;
     const comp = db.getCompany(authoritativeCompanyId);
     if (!comp) return res.status(400).json({ error: { code: 'INVALID_COMPANY', message: 'Valid company required' } });
 
@@ -958,78 +1183,80 @@ async function startServer() {
       }
     }
 
-    const newTrip = await db.createTrip({
-      companyId: comp.id,
-      studentName: (studentName || customerName || 'Student').trim(),
-      studentPhone: (studentPhone || customerPhone || '').trim(),
-      pickupAddress: pickupAddress || 'Campus Crest Dorms, Blat',
-      pickupCoords: pickupCoords || { lat: 34.1215, lng: 35.663 },
-      dropoffAddress: dropoffAddress || 'LAU Byblos - Upper Gate',
-      dropoffCoords: dropoffCoords || { lat: 34.1238, lng: 35.6698 },
-      notes: (req.body.notes || packageInfo || 'Campus Dorm Shuttle').trim(),
-      priority: priority || 'normal',
-      assignedDriverId,
-      roadDistanceKm,
-      estimatedMinutes,
-      routeGeometry,
-    });
+    try {
+      const newTrip = await db.createTrip({
+        companyId: comp.id,
+        studentName: (studentName || 'Student').trim(),
+        studentPhone: (studentPhone || '').trim(),
+        pickupAddress: pickupAddress || 'Campus Crest Dorms, Blat',
+        pickupCoords: pickupCoords || { lat: 34.1215, lng: 35.663 },
+        dropoffAddress: dropoffAddress || 'LAU Byblos - Upper Gate',
+        dropoffCoords: dropoffCoords || { lat: 34.1238, lng: 35.6698 },
+        notes: (notes || 'Campus Dorm Shuttle').trim(),
+        priority: priority || 'normal',
+        assignedDriverId,
+        roadDistanceKm,
+        estimatedMinutes,
+        routeGeometry,
+      });
 
-    // Realtime broadcast to company dispatch room
-    io.to(`company:${comp.id}`).emit('trip:created', newTrip);
+      // Realtime broadcast to company dispatch room
+      io.to(`company:${comp.id}`).emit('trip:created', newTrip);
 
-    // If driver assigned, push to driver room
-    if (assignedDriverId) {
-      io.to(`driver:${assignedDriverId}`).emit('trip:assigned', newTrip);
+      // If driver assigned, push to driver room
+      if (assignedDriverId) {
+        io.to(`driver:${assignedDriverId}`).emit('trip:assigned', newTrip);
+      }
+
+      res.status(201).json(newTrip);
+    } catch (err) {
+      console.error('Failed to create trip in database:', err);
+      return res.status(500).json({ error: { code: 'DATABASE_ERROR', message: 'Failed to create trip due to database error' } });
     }
-
-    res.status(201).json(newTrip);
   };
 
-  app.post('/api/trips', optionalAuth, createTripHandler);
+  app.post('/api/trips', requireAuth, createTripHandler);
 
   const assignTripHandler = async (req: express.Request, res: express.Response) => {
-    if (!req.user && process.env.NODE_ENV === 'production' && process.env.DEMO_MODE !== 'true') {
-      return res.status(401).json({ error: { code: 'UNAUTHORIZED', message: 'Authentication required to assign trips.' } });
-    }
-
-    if (req.user?.role === 'DRIVER') {
+    if (isDriverRole(req.user!.role)) {
       return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Drivers cannot assign or reassign trips.' } });
     }
 
     const { driverId } = req.body;
-    const authCompanyId = req.user?.companyId;
+    const authCompanyId = req.user!.companyId;
 
-    if (driverId && authCompanyId) {
+    if (driverId) {
       const targetDriver = db.getDriver(driverId);
       if (!targetDriver || targetDriver.companyId !== authCompanyId) {
         return res.status(400).json({ error: { code: 'INVALID_DRIVER', message: 'Assigned driver must belong to your company.' } });
       }
     }
 
-    const result = await db.assignTrip(req.params.id, driverId, authCompanyId);
-    if (!result) {
-      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Trip not found' } });
-    }
-    if ('error' in result) {
-      return res.status(400).json({ error: { code: 'ASSIGNMENT_ERROR', message: result.error } });
-    }
+    try {
+      const result = await db.assignTrip(req.params.id, driverId, authCompanyId);
+      if (!result) {
+        return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Trip not found' } });
+      }
+      if ('error' in result) {
+        return res.status(400).json({ error: { code: 'ASSIGNMENT_ERROR', message: result.error } });
+      }
 
-    const trip = result;
-    io.to(`company:${trip.companyId || trip.networkCode}`).emit('trip:updated', trip);
-    if (driverId) {
-      io.to(`driver:${driverId}`).emit('trip:assigned', trip);
-    }
+      const trip = result;
+      io.to(`company:${trip.companyId || trip.networkCode}`).emit('trip:updated', trip);
+      if (driverId) {
+        io.to(`driver:${driverId}`).emit('trip:assigned', trip);
+      }
 
-    res.json(trip);
+      res.json(trip);
+    } catch (err) {
+      console.error('Failed to assign trip in database:', err);
+      return res.status(500).json({ error: { code: 'DATABASE_ERROR', message: 'Failed to assign trip due to database error' } });
+    }
   };
 
-  app.patch('/api/trips/:id/assign', optionalAuth, assignTripHandler);
+  app.patch('/api/trips/:id/assign', requireAuth, assignTripHandler);
 
   const updateStatusHandler = async (req: express.Request, res: express.Response) => {
-    if (!req.user && process.env.NODE_ENV === 'production' && process.env.DEMO_MODE !== 'true') {
-      return res.status(401).json({ error: { code: 'UNAUTHORIZED', message: 'Authentication required to update trip status.' } });
-    }
-
     const { note } = req.body;
     const status = (req.body.status as string)?.toUpperCase();
     const existing = db.getTrip(req.params.id);
@@ -1038,38 +1265,43 @@ async function startServer() {
     }
 
     // Role-based authorization: driver can only update assigned trips; company can only update its own trips
-    if (req.user?.role === 'DRIVER') {
-      const drv = db.getDriverByUserId(req.user.id);
+    if (isDriverRole(req.user!.role)) {
+      const drv = db.getDriverByUserId(req.user!.id);
       if (!drv || existing.assignedDriverId !== drv.id) {
         return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Drivers can only update trips assigned to them.' } });
       }
-    } else if (req.user?.companyId && existing.companyId !== req.user.companyId) {
+    } else if (existing.companyId !== req.user!.companyId) {
       return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Cannot modify trips belonging to another company.' } });
     }
 
-    const result = await db.updateTripStatus(req.params.id, status as TripStatus, note);
-    if (!result) {
-      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Trip not found' } });
+    try {
+      const result = await db.updateTripStatus(req.params.id, status as TripStatus, note);
+      if (!result) {
+        return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Trip not found' } });
+      }
+      if ('error' in result) {
+        return res.status(422).json({ error: { code: 'INVALID_TRANSITION', message: result.error } });
+      }
+
+      const trip = result;
+      io.to(`company:${trip.companyId || trip.networkCode}`).emit('trip:updated', trip);
+
+      const statusPayload = {
+        tripId: trip.id,
+        status: trip.status,
+        timestamp: Date.now(),
+        note,
+      };
+      io.to(`trip:${trip.id}`).emit('trip:status_changed', statusPayload);
+
+      res.json(trip);
+    } catch (err) {
+      console.error('Failed to update trip status in database:', err);
+      return res.status(500).json({ error: { code: 'DATABASE_ERROR', message: 'Failed to update trip status due to database error' } });
     }
-    if ('error' in result) {
-      return res.status(422).json({ error: { code: 'INVALID_TRANSITION', message: result.error } });
-    }
-
-    const trip = result;
-    io.to(`company:${trip.companyId || trip.networkCode}`).emit('trip:updated', trip);
-
-    const statusPayload = {
-      tripId: trip.id,
-      status: trip.status,
-      timestamp: Date.now(),
-      note,
-    };
-    io.to(`trip:${trip.id}`).emit('trip:status_changed', statusPayload);
-
-    res.json(trip);
   };
 
-  app.patch('/api/trips/:id/status', optionalAuth, updateStatusHandler);
+  app.patch('/api/trips/:id/status', requireAuth, updateStatusHandler);
 
   // ==================== SECURE STUDENT & PUBLIC TRACKING API ====================
 
@@ -1093,9 +1325,9 @@ async function startServer() {
       trackingRateLimits.set(clientIp, { count: 1, resetTime: now + 60000 });
     }
 
-    const query = req.params.tokenOrCode;
-    if (query) {
-      const tokenRecord = trackingRateLimits.get(`tok:${query}`);
+    const trackingToken = req.params.trackingToken || (req.params as Record<string, string>).tokenOrCode;
+    if (trackingToken) {
+      const tokenRecord = trackingRateLimits.get(`tok:${trackingToken}`);
       if (tokenRecord && now < tokenRecord.resetTime) {
         tokenRecord.count++;
         if (tokenRecord.count > 60) {
@@ -1108,16 +1340,16 @@ async function startServer() {
           });
         }
       } else {
-        trackingRateLimits.set(`tok:${query}`, { count: 1, resetTime: now + 60000 });
+        trackingRateLimits.set(`tok:${trackingToken}`, { count: 1, resetTime: now + 60000 });
       }
     }
 
-    const isProdStrict = process.env.NODE_ENV === 'production' && process.env.DEMO_MODE !== 'true';
-
-    // Secure token enforcement: require trackingToken (or trackingCode in demo mode)
-    let trip = db.getTripByToken(query);
-    if (!trip && !isProdStrict) {
-      trip = db.getTripByTracking(query);
+    // Production lookup: strict trackingToken only via db.getTripByToken
+    let trip: Trip | null = null;
+    if (process.env.DEMO_MODE === 'true') {
+      trip = db.getTripByToken(trackingToken) || db.getTripByTracking(trackingToken);
+    } else {
+      trip = db.getTripByToken(trackingToken);
     }
 
     if (!trip) {
@@ -1129,13 +1361,13 @@ async function startServer() {
       });
     }
 
-    // Check token expiration (48-hour lifetime)
-    const tokenExpiresAt = trip.tokenExpiresAt || (trip.createdAt + 48 * 60 * 60 * 1000);
+    // Check token expiration (48-hour lifetime) and revocation
+    const tokenExpiresAt = trip.tokenExpiresAt || trip.trackingTokenExpiresAt || (trip.createdAt + 48 * 60 * 60 * 1000);
     if (now > tokenExpiresAt || trip.tokenRevoked) {
       return res.status(410).json({
         error: {
           code: 'TRACKING_EXPIRED',
-          message: 'This tracking link has expired.',
+          message: 'This tracking link has expired or has been revoked.',
         },
       });
     }
@@ -1214,7 +1446,7 @@ async function startServer() {
       status: trip.status,
       tripStatus: trip.status,
       trackingState,
-      trackingCode: trip.trackingCode,
+      ...(process.env.DEMO_MODE === 'true' ? { trackingCode: trip.trackingCode } : {}),
       pickup: {
         address: trip.pickupAddress,
         lat: trip.pickupCoords.lat,
@@ -1253,13 +1485,12 @@ async function startServer() {
     res.json(response);
   };
 
-  app.get('/api/public/tracking/:tokenOrCode', handlePublicTracking);
+  app.get('/api/public/tracking/:trackingToken', handlePublicTracking);
 
   // ==================== FLEET ANALYTICS ====================
 
-  app.get('/api/analytics', optionalAuth, (req, res) => {
-    const { companyId, networkCode } = req.query;
-    const targetComp = (companyId || networkCode || req.user?.companyId || 'comp-byblos-01') as string;
+  app.get('/api/analytics', requireAuth, (req, res) => {
+    const targetComp = req.user!.companyId;
     const drivers = db.listDrivers(targetComp);
     const activeTrips = db.listActiveTrips(targetComp);
     const tripLogs = db.listTripLogs(targetComp);

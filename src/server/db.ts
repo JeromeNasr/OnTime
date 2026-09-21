@@ -4,8 +4,11 @@ import pg from 'pg';
 import {
   User,
   Company,
+  Network,
   Vehicle,
   Driver,
+  DriverLocation,
+  PublicVehicle,
   Trip,
   TripLog,
   TripPoint,
@@ -108,13 +111,13 @@ pool.on('error', (err) => {
 
 export { pool };
 
-// Async helper to fire-and-forget or await safe SQL
+// Async helper to execute SQL statements. Propagates failures to the caller to prevent silent database write drops.
 async function executeSql(query: string, params: any[] = []): Promise<any> {
   try {
     return await pool.query(query, params);
   } catch (err) {
-    console.error('Database write error:', err, 'Query was:', query.slice(0, 100));
-    return null;
+    console.error('Database SQL write error:', err, 'Query was:', query.slice(0, 100));
+    throw err;
   }
 }
 
@@ -122,8 +125,12 @@ async function executeSql(query: string, params: any[] = []): Promise<any> {
  * Prune old location pings older than 48 hours to enforce retention policy
  */
 export async function pruneOldPings(): Promise<void> {
-  const cutoff = Date.now() - 48 * 60 * 60 * 1000;
-  await executeSql('DELETE FROM location_pings WHERE timestamp < $1;', [cutoff]);
+  try {
+    const cutoff = Date.now() - 48 * 60 * 60 * 1000;
+    await executeSql('DELETE FROM location_pings WHERE timestamp < $1;', [cutoff]);
+  } catch (err) {
+    console.warn('Prune old pings error:', err);
+  }
 }
 
 /**
@@ -140,6 +147,16 @@ export async function initDatabase(): Promise<void> {
       ALTER TABLE trips ADD COLUMN IF NOT EXISTS route_geometry JSONB;
       ALTER TABLE trips ADD COLUMN IF NOT EXISTS token_revoked BOOLEAN DEFAULT FALSE;
       ALTER TABLE drivers ADD COLUMN IF NOT EXISTS current_trip_id VARCHAR(64);
+      ALTER TABLE drivers ADD COLUMN IF NOT EXISTS location_sharing_enabled BOOLEAN DEFAULT TRUE;
+      ALTER TABLE drivers ADD COLUMN IF NOT EXISTS speedometer_enabled BOOLEAN DEFAULT TRUE;
+      ALTER TABLE companies ADD COLUMN IF NOT EXISTS join_code VARCHAR(32);
+      ALTER TABLE companies ADD COLUMN IF NOT EXISTS is_public BOOLEAN DEFAULT TRUE;
+      ALTER TABLE companies ADD COLUMN IF NOT EXISTS lead_driver_id VARCHAR(64);
+      ALTER TABLE companies ADD COLUMN IF NOT EXISTS lead_phone VARCHAR(32);
+      UPDATE companies SET join_code = '482913' WHERE id = 'comp-byblos-01' AND (join_code IS NULL OR join_code = '');
+      UPDATE companies SET join_code = '739104' WHERE id = 'comp-lau-dorm' AND (join_code IS NULL OR join_code = '');
+      UPDATE companies SET lead_phone = '+961 70 123 456' WHERE id = 'comp-byblos-01' AND (lead_phone IS NULL OR lead_phone = '');
+      UPDATE companies SET lead_phone = '+961 70 882 144' WHERE id = 'comp-lau-dorm' AND (lead_phone IS NULL OR lead_phone = '');
     `);
 
     const res = await pool.query('SELECT count(*) FROM companies;');
@@ -157,7 +174,10 @@ export async function initDatabase(): Promise<void> {
     setInterval(pruneOldPings, 60 * 60 * 1000);
   } catch (err) {
     console.error('Error during initDatabase:', err);
-    // Fallback seed in memory so application runs regardless of network glitches
+    if (process.env.NODE_ENV === 'production' && process.env.DEMO_MODE !== 'true') {
+      throw new Error(`Fatal PostgreSQL initialization error: ${(err as Error).message}`);
+    }
+    // Fallback seed in memory so application runs in local offline development/demo mode
     seedInitialDataInMemory();
   }
 }
@@ -507,6 +527,10 @@ async function hydrateFromPostgres(): Promise<void> {
       ownerName: r.owner_name,
       ownerEmail: r.owner_email,
       phone: r.phone,
+      leadDriverId: r.lead_driver_id || undefined,
+      leadPhone: r.lead_phone || r.phone,
+      joinCode: r.join_code || r.code,
+      isPublic: r.is_public !== false,
       createdAt: Number(r.created_at),
       settings: typeof r.settings === 'string' ? JSON.parse(r.settings) : r.settings,
     };
@@ -552,8 +576,11 @@ async function hydrateFromPostgres(): Promise<void> {
       vehicleModel: r.vehicle_model,
       plateNumber: r.plate_number,
       networkCode: comp ? comp.code : 'FLEET',
+      networkName: comp ? comp.name : undefined,
       isLeadDriver: r.is_lead_driver,
       status: r.status,
+      locationSharingEnabled: r.location_sharing_enabled !== false,
+      speedometerEnabled: r.speedometer_enabled !== false,
       currentLocation: loc,
       currentTripId: r.current_trip_id || undefined,
       totalTrips: r.total_trips,
@@ -682,18 +709,61 @@ function seedInitialDataInMemory(): void {
 }
 
 export const db = {
-  // Companies
-  getCompany(id: string): Company | null {
+  async checkHealth(): Promise<{ healthy: boolean; postgres: boolean; error?: string }> {
+    try {
+      await pool.query('SELECT 1;');
+      return { healthy: true, postgres: true };
+    } catch (err) {
+      return { healthy: false, postgres: false, error: (err as Error).message };
+    }
+  },
+
+  // Companies & Networks
+  getCompany(id: string): Network | null {
     return dbState.companies[id] || null;
   },
 
-  getCompanyByCode(code: string): Company | null {
+  getCompanyByCode(code: string): Network | null {
     const clean = code.trim().toUpperCase();
     return Object.values(dbState.companies).find((c) => c.code.toUpperCase() === clean) || null;
   },
 
-  listCompanies(): Company[] {
+  getNetworkByJoinCode(code: string): Network | null {
+    const clean = (code || '').trim().toUpperCase();
+    return (
+      Object.values(dbState.companies).find(
+        (c) =>
+          (c.joinCode && c.joinCode.toUpperCase() === clean) ||
+          c.code.toUpperCase() === clean ||
+          c.id === clean
+      ) || null
+    );
+  },
+
+  listCompanies(): Network[] {
     return Object.values(dbState.companies);
+  },
+
+  listPublicNetworks(): Network[] {
+    const now = Date.now();
+    return Object.values(dbState.companies)
+      .filter((c) => c.isPublic !== false)
+      .map((c) => {
+        const driversInNet = Object.values(dbState.drivers).filter((d) => d.companyId === c.id);
+        const activeCount = driversInNet.filter((d) => {
+          if (d.locationSharingEnabled === false) return false;
+          const ageSec = (now - (d.currentLocation?.timestamp || 0)) / 1000;
+          return ageSec < 300; // active in last 5 minutes
+        }).length;
+
+        const leadDriver = driversInNet.find((d) => d.isLeadDriver) || (c.leadDriverId ? dbState.drivers[c.leadDriverId] : undefined);
+        return {
+          ...c,
+          leadDriverName: leadDriver ? leadDriver.name : c.ownerName,
+          leadPhone: c.leadPhone || (leadDriver ? leadDriver.phone : c.phone),
+          activeVehicleCount: activeCount,
+        };
+      });
   },
 
   async createCompany(companyData: {
@@ -702,33 +772,66 @@ export const db = {
     ownerName: string;
     ownerEmail: string;
     phone?: string;
-  }): Promise<Company> {
+    joinCode?: string;
+    leadDriverId?: string;
+    leadPhone?: string;
+    isPublic?: boolean;
+  }): Promise<Network> {
     const id = `comp-${crypto.randomUUID().slice(0, 8)}`;
-    const company: Company = {
+    const joinCode = companyData.joinCode || String(crypto.randomInt(100000, 999999));
+    const company: Network = {
       id,
       code: companyData.code.trim().toUpperCase(),
       name: companyData.name.trim(),
       ownerName: companyData.ownerName.trim(),
       ownerEmail: companyData.ownerEmail.trim().toLowerCase(),
       phone: companyData.phone,
+      joinCode,
+      leadDriverId: companyData.leadDriverId,
+      leadPhone: companyData.leadPhone || companyData.phone,
+      isPublic: companyData.isPublic !== false,
       createdAt: Date.now(),
       settings: {
         adaptiveGpsMovingSec: 3,
         adaptiveGpsStoppedSec: 25,
         speedLimitKmH: 80,
-        enablePublicDriverPhone: false,
+        enablePublicDriverPhone: true,
       },
     };
 
-    dbState.companies[id] = company;
-
     await executeSql(
-      `INSERT INTO companies (id, code, name, owner_name, owner_email, phone, settings, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8);`,
-      [company.id, company.code, company.name, company.ownerName, company.ownerEmail, company.phone, JSON.stringify(company.settings), company.createdAt]
+      `INSERT INTO companies (id, code, name, owner_name, owner_email, phone, join_code, is_public, lead_driver_id, lead_phone, settings, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12);`,
+      [
+        company.id,
+        company.code,
+        company.name,
+        company.ownerName,
+        company.ownerEmail,
+        company.phone,
+        company.joinCode,
+        company.isPublic,
+        company.leadDriverId || null,
+        company.leadPhone || null,
+        JSON.stringify(company.settings),
+        company.createdAt,
+      ]
     );
 
+    dbState.companies[id] = company;
     return company;
+  },
+
+  async updateNetworkLead(companyId: string, leadDriverId: string, leadPhone?: string): Promise<Network | null> {
+    const comp = dbState.companies[companyId];
+    if (!comp) return null;
+    await executeSql(
+      `UPDATE companies SET lead_driver_id = $1, lead_phone = COALESCE($2, lead_phone) WHERE id = $3;`,
+      [leadDriverId, leadPhone || null, companyId]
+    );
+    comp.leadDriverId = leadDriverId;
+    if (leadPhone) comp.leadPhone = leadPhone;
+    return comp;
   },
 
   // Users
@@ -761,8 +864,6 @@ export const db = {
       passwordHash: userData.passwordHash,
     };
 
-    dbState.users[id] = user;
-
     await executeSql(
       `INSERT INTO users (id, company_id, email, name, phone, role, password_hash, created_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8);`,
@@ -776,6 +877,8 @@ export const db = {
        ON CONFLICT (company_id, user_id) DO NOTHING;`,
       [`mem-${id}`, user.companyId, user.id, user.role, user.createdAt]
     );
+
+    dbState.users[id] = user;
 
     return user;
   },
@@ -813,13 +916,13 @@ export const db = {
       status: 'active',
     };
 
-    dbState.vehicles[id] = vehicle;
-
     await executeSql(
       `INSERT INTO vehicles (id, company_id, plate_number, make_model, type, year, capacity, status, created_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9);`,
       [vehicle.id, vehicle.companyId, vehicle.plateNumber, vehicle.makeModel, vehicle.type, vehicle.year || null, vehicle.capacityKg ? Math.round(vehicle.capacityKg / 100) : 4, vehicle.status, Date.now()]
     );
+
+    dbState.vehicles[id] = vehicle;
 
     return vehicle;
   },
@@ -883,13 +986,13 @@ export const db = {
       lastHeartbeat: Date.now(),
     };
 
-    dbState.drivers[id] = driver;
-
     await executeSql(
       `INSERT INTO drivers (id, user_id, company_id, vehicle_id, name, phone, vehicle_model, plate_number, is_lead_driver, status, current_location, total_trips, rating, last_heartbeat, created_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15);`,
       [driver.id, driver.userId || null, driver.companyId, driver.vehicleId || null, driver.name, driver.phone, driver.vehicleModel, driver.plateNumber, driver.isLeadDriver, driver.status, JSON.stringify(driver.currentLocation), driver.totalTrips, driver.rating, driver.lastHeartbeat, Date.now()]
     );
+
+    dbState.drivers[id] = driver;
 
     return driver;
   },
@@ -913,10 +1016,11 @@ export const db = {
     if (!driver) return null;
 
     const timestamp = location.timestamp || Date.now();
-    driver.currentLocation = {
+    const cleanSpeed = Math.max(0, location.speed);
+    const updatedLocation: DriverLocation = {
       lat: location.lat,
       lng: location.lng,
-      speed: Math.max(0, location.speed),
+      speed: cleanSpeed,
       heading: location.heading,
       accuracy: location.accuracy,
       timestamp,
@@ -925,14 +1029,13 @@ export const db = {
       networkStatus: location.networkStatus,
       isSimulated: location.isSimulated,
     };
-    driver.lastHeartbeat = timestamp;
 
-    // Update in Postgres
+    // Update in Postgres FIRST
     await executeSql(
       `UPDATE drivers
        SET current_location = $1, last_heartbeat = $2
        WHERE id = $3;`,
-      [JSON.stringify(driver.currentLocation), driver.lastHeartbeat, driver.id]
+      [JSON.stringify(updatedLocation), timestamp, driver.id]
     );
 
     // Record ping for audit/retention tracking
@@ -940,8 +1043,12 @@ export const db = {
     await executeSql(
       `INSERT INTO location_pings (id, driver_id, trip_id, lat, lng, speed, heading, accuracy, battery_level, network_status, is_simulated, timestamp)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12);`,
-      [pingId, driver.id, driver.currentTripId || null, location.lat, location.lng, location.speed, location.heading, location.accuracy, location.batteryLevel || null, location.networkStatus || null, location.isSimulated || false, timestamp]
+      [pingId, driver.id, driver.currentTripId || null, location.lat, location.lng, cleanSpeed, location.heading, location.accuracy, location.batteryLevel || null, location.networkStatus || null, location.isSimulated || false, timestamp]
     );
+
+    // Update in memory ONLY after Postgres write succeeds
+    driver.currentLocation = updatedLocation;
+    driver.lastHeartbeat = timestamp;
 
     return driver;
   },
@@ -949,10 +1056,132 @@ export const db = {
   async updateDriverStatus(id: string, status: Driver['status']): Promise<Driver | null> {
     const driver = dbState.drivers[id];
     if (!driver) return null;
-    driver.status = status;
 
     await executeSql(`UPDATE drivers SET status = $1 WHERE id = $2;`, [status, id]);
+    driver.status = status;
     return driver;
+  },
+
+  async setDriverBroadcasting(
+    id: string,
+    locationSharingEnabled: boolean,
+    speedometerEnabled?: boolean
+  ): Promise<Driver | null> {
+    const driver = dbState.drivers[id];
+    if (!driver) return null;
+
+    const speedo = speedometerEnabled !== undefined ? speedometerEnabled : (driver.speedometerEnabled !== false);
+    await executeSql(
+      `UPDATE drivers SET location_sharing_enabled = $1, speedometer_enabled = $2 WHERE id = $3;`,
+      [locationSharingEnabled, speedo, id]
+    );
+    driver.locationSharingEnabled = locationSharingEnabled;
+    driver.speedometerEnabled = speedo;
+    if (!locationSharingEnabled) {
+      driver.status = 'OFFLINE';
+    } else if (driver.status === 'OFFLINE') {
+      driver.status = 'ONLINE';
+    }
+    return driver;
+  },
+
+  async updateDriverNetwork(driverId: string, companyId: string, isLead: boolean = false): Promise<Driver | null> {
+    const driver = dbState.drivers[driverId];
+    const comp = dbState.companies[companyId];
+    if (!driver || !comp) return null;
+
+    await executeSql(
+      `UPDATE drivers SET company_id = $1, is_lead_driver = $2 WHERE id = $3;`,
+      [comp.id, isLead, driver.id]
+    );
+    driver.companyId = comp.id;
+    driver.networkCode = comp.code;
+    driver.networkName = comp.name;
+    driver.isLeadDriver = isLead;
+    return driver;
+  },
+
+  async removeDriverFromNetwork(driverId: string): Promise<Driver | null> {
+    const driver = dbState.drivers[driverId];
+    if (!driver) return null;
+    await executeSql(`UPDATE drivers SET status = 'OFFLINE', location_sharing_enabled = FALSE WHERE id = $1;`, [driverId]);
+    driver.status = 'OFFLINE';
+    driver.locationSharingEnabled = false;
+    return driver;
+  },
+
+  listPublicVehicles(networkIds?: string[]): PublicVehicle[] {
+    const now = Date.now();
+    const vehicles: PublicVehicle[] = [];
+
+    for (const driver of Object.values(dbState.drivers)) {
+      const comp = driver.companyId ? dbState.companies[driver.companyId] : null;
+      if (!comp || comp.isPublic === false) continue;
+
+      // If specific networks are requested, filter by company id or code
+      if (networkIds && networkIds.length > 0) {
+        const matches = networkIds.some((id) => id === comp.id || id.toUpperCase() === comp.code.toUpperCase());
+        if (!matches) continue;
+      }
+
+      // Check broadcasting flag: when location sharing is OFF, do NOT broadcast live coordinates to customers
+      if (driver.locationSharingEnabled === false) {
+        continue;
+      }
+
+      const loc = driver.currentLocation;
+      if (!loc || typeof loc.lat !== 'number' || typeof loc.lng !== 'number') continue;
+
+      const ageSec = (now - (loc.timestamp || 0)) / 1000;
+      let freshness: 'FRESH' | 'STALE' | 'OFFLINE' = 'FRESH';
+      if (ageSec > 120) {
+        freshness = 'OFFLINE';
+      } else if (ageSec > 25) {
+        freshness = 'STALE';
+      }
+
+      // If driver hasn't sent telemetry in over 10 minutes, do not display ghost car on public map
+      if (ageSec > 600) {
+        continue;
+      }
+
+      const status: 'ONLINE' | 'LOCATION_OFF' | 'STALE' | 'OFFLINE' =
+        freshness === 'OFFLINE' ? 'OFFLINE' : freshness === 'STALE' ? 'STALE' : 'ONLINE';
+
+      const vehicle = driver.vehicleId ? dbState.vehicles[driver.vehicleId] : null;
+      const vehicleModel = vehicle?.makeModel || driver.vehicleModel || 'Taxi Sedan';
+      const plateNumber = vehicle?.plateNumber || driver.plateNumber || 'Public Taxi';
+
+      const speed = (driver.speedometerEnabled !== false) ? Math.round(loc.speed || 0) : 0;
+
+      vehicles.push({
+        id: `veh-${driver.id}`,
+        driverId: driver.id,
+        driverName: driver.name,
+        phone: comp.settings?.enablePublicDriverPhone !== false ? driver.phone : undefined,
+        networkId: comp.id,
+        networkCode: comp.code,
+        networkName: comp.name,
+        leadDriverName: comp.ownerName,
+        leadPhone: comp.leadPhone || comp.phone,
+        vehicleModel,
+        plateNumber,
+        status,
+        location: {
+          lat: loc.lat,
+          lng: loc.lng,
+          speed,
+          heading: loc.heading || 0,
+          accuracy: loc.accuracy || 5,
+          timestamp: loc.timestamp,
+          isCalculatedSpeed: loc.isCalculatedSpeed,
+          freshness,
+        },
+        locationSharingEnabled: true,
+      });
+    }
+
+    return vehicles;
   },
 
   // ==================== CANONICAL TRIPS ====================
@@ -1059,16 +1288,7 @@ export const db = {
       ],
     };
 
-    dbState.trips[id] = trip;
-
-    if (tripData.assignedDriverId && dbState.drivers[tripData.assignedDriverId]) {
-      const driver = dbState.drivers[tripData.assignedDriverId];
-      driver.status = 'ASSIGNED';
-      driver.currentTripId = id;
-      await executeSql(`UPDATE drivers SET status = 'ASSIGNED', current_trip_id = $1 WHERE id = $2;`, [id, driver.id]);
-    }
-
-    // Persist trip to Postgres
+    // Persist trip to Postgres FIRST
     await executeSql(
       `INSERT INTO trips (id, company_id, driver_id, tracking_code, tracking_token, token_expires_at, student_name, student_phone, pickup_address, pickup_lat, pickup_lng, destination_address, destination_lat, destination_lng, status, estimated_minutes, road_distance_km, created_at, updated_at, notes, route_geometry)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21);`,
@@ -1081,6 +1301,15 @@ export const db = {
        VALUES ($1, $2, $3, $4, $5, TRUE);`,
       [`sess-${id}`, id, trackingToken, now, tokenExpiresAt]
     );
+
+    if (tripData.assignedDriverId && dbState.drivers[tripData.assignedDriverId]) {
+      const driver = dbState.drivers[tripData.assignedDriverId];
+      await executeSql(`UPDATE drivers SET status = 'ASSIGNED', current_trip_id = $1 WHERE id = $2;`, [id, driver.id]);
+      driver.status = 'ASSIGNED';
+      driver.currentTripId = id;
+    }
+
+    dbState.trips[id] = trip;
 
     return trip;
   },
@@ -1104,10 +1333,13 @@ export const db = {
       // If previously assigned to another driver, release that driver
       if (trip.assignedDriverId && trip.assignedDriverId !== driverId && dbState.drivers[trip.assignedDriverId]) {
         const prev = dbState.drivers[trip.assignedDriverId];
+        await executeSql(`UPDATE drivers SET status = 'AVAILABLE', current_trip_id = NULL WHERE id = $1;`, [prev.id]);
         prev.status = 'AVAILABLE';
         delete prev.currentTripId;
-        await executeSql(`UPDATE drivers SET status = 'AVAILABLE', current_trip_id = NULL WHERE id = $1;`, [prev.id]);
       }
+
+      await executeSql(`UPDATE trips SET driver_id = $1, status = 'ASSIGNED', updated_at = $2 WHERE id = $3;`, [driverId, now, tripId]);
+      await executeSql(`UPDATE drivers SET status = 'ASSIGNED', current_trip_id = $1 WHERE id = $2;`, [tripId, driverId]);
 
       trip.assignedDriverId = driverId;
       trip.driverId = driverId;
@@ -1121,15 +1353,14 @@ export const db = {
       });
       driver.status = 'ASSIGNED';
       driver.currentTripId = trip.id;
-
-      await executeSql(`UPDATE trips SET driver_id = $1, status = 'ASSIGNED', updated_at = $2 WHERE id = $3;`, [driverId, now, tripId]);
-      await executeSql(`UPDATE drivers SET status = 'ASSIGNED', current_trip_id = $1 WHERE id = $2;`, [tripId, driverId]);
     } else {
       if (trip.assignedDriverId && dbState.drivers[trip.assignedDriverId]) {
+        await executeSql(`UPDATE drivers SET status = 'AVAILABLE', current_trip_id = NULL WHERE id = $1;`, [trip.assignedDriverId]);
         dbState.drivers[trip.assignedDriverId].status = 'AVAILABLE';
         delete dbState.drivers[trip.assignedDriverId].currentTripId;
-        await executeSql(`UPDATE drivers SET status = 'AVAILABLE', current_trip_id = NULL WHERE id = $1;`, [trip.assignedDriverId]);
       }
+      await executeSql(`UPDATE trips SET driver_id = NULL, status = 'CREATED', updated_at = $1 WHERE id = $2;`, [now, tripId]);
+
       trip.assignedDriverId = undefined;
       trip.driverId = undefined;
       trip.status = 'CREATED';
@@ -1140,8 +1371,6 @@ export const db = {
         timestamp: now,
         note: 'Trip unassigned back to dispatch pool',
       });
-
-      await executeSql(`UPDATE trips SET driver_id = NULL, status = 'CREATED', updated_at = $1 WHERE id = $2;`, [now, tripId]);
     }
 
     return trip;
@@ -1165,15 +1394,50 @@ export const db = {
     }
 
     const now = Date.now();
-    trip.status = targetCanonical;
-    trip.updatedAt = now;
-    if (targetCanonical === 'EN_ROUTE_PICKUP' && !trip.startedAt) {
-      trip.startedAt = now;
+    const isStarted = targetCanonical === 'EN_ROUTE_PICKUP' && !trip.startedAt;
+    const isCompleted = targetCanonical === 'COMPLETED' && !trip.completedAt;
+
+    // Database writes first
+    if (isStarted) {
       await executeSql(`UPDATE trips SET started_at = $1 WHERE id = $2;`, [now, tripId]);
     }
-    if (targetCanonical === 'COMPLETED' && !trip.completedAt) {
-      trip.completedAt = now;
+    if (isCompleted) {
       await executeSql(`UPDATE trips SET completed_at = $1 WHERE id = $2;`, [now, tripId]);
+    }
+
+    if (trip.assignedDriverId && dbState.drivers[trip.assignedDriverId]) {
+      const driver = dbState.drivers[trip.assignedDriverId];
+      if (targetCanonical === 'COMPLETED' || targetCanonical === 'CANCELLED') {
+        await executeSql(`UPDATE drivers SET status = 'AVAILABLE', current_trip_id = NULL, total_trips = total_trips + ${targetCanonical === 'COMPLETED' ? 1 : 0} WHERE id = $1;`, [driver.id]);
+      } else if (targetCanonical === 'EN_ROUTE_PICKUP') {
+        await executeSql(`UPDATE drivers SET status = 'EN_ROUTE_PICKUP' WHERE id = $1;`, [driver.id]);
+      } else if (targetCanonical === 'AT_PICKUP') {
+        await executeSql(`UPDATE drivers SET status = 'AT_PICKUP' WHERE id = $1;`, [driver.id]);
+      } else if (targetCanonical === 'IN_TRANSIT') {
+        await executeSql(`UPDATE drivers SET status = 'IN_TRANSIT' WHERE id = $1;`, [driver.id]);
+      } else if (targetCanonical === 'AT_DESTINATION') {
+        await executeSql(`UPDATE drivers SET status = 'AT_DESTINATION' WHERE id = $1;`, [driver.id]);
+      }
+    }
+
+    await executeSql(`UPDATE trips SET status = $1, updated_at = $2 WHERE id = $3;`, [targetCanonical, now, tripId]);
+
+    // Record status history entry in Postgres
+    const histId = `tsh-${crypto.randomUUID().slice(0, 8)}`;
+    await executeSql(
+      `INSERT INTO trip_status_history (id, trip_id, status, timestamp, note)
+       VALUES ($1, $2, $3, $4, $5);`,
+      [histId, tripId, targetCanonical, now, note || null]
+    );
+
+    // Apply in-memory mutations only after successful PostgreSQL writes
+    trip.status = targetCanonical;
+    trip.updatedAt = now;
+    if (isStarted) {
+      trip.startedAt = now;
+    }
+    if (isCompleted) {
+      trip.completedAt = now;
     }
 
     trip.statusHistory = trip.statusHistory || [];
@@ -1191,31 +1455,16 @@ export const db = {
         if (targetCanonical === 'COMPLETED') {
           driver.totalTrips += 1;
         }
-        await executeSql(`UPDATE drivers SET status = 'AVAILABLE', current_trip_id = NULL, total_trips = total_trips + ${targetCanonical === 'COMPLETED' ? 1 : 0} WHERE id = $1;`, [driver.id]);
       } else if (targetCanonical === 'EN_ROUTE_PICKUP') {
         driver.status = 'EN_ROUTE_PICKUP';
-        await executeSql(`UPDATE drivers SET status = 'EN_ROUTE_PICKUP' WHERE id = $1;`, [driver.id]);
       } else if (targetCanonical === 'AT_PICKUP') {
         driver.status = 'AT_PICKUP';
-        await executeSql(`UPDATE drivers SET status = 'AT_PICKUP' WHERE id = $1;`, [driver.id]);
       } else if (targetCanonical === 'IN_TRANSIT') {
         driver.status = 'IN_TRANSIT';
-        await executeSql(`UPDATE drivers SET status = 'IN_TRANSIT' WHERE id = $1;`, [driver.id]);
       } else if (targetCanonical === 'AT_DESTINATION') {
         driver.status = 'AT_DESTINATION';
-        await executeSql(`UPDATE drivers SET status = 'AT_DESTINATION' WHERE id = $1;`, [driver.id]);
       }
     }
-
-    await executeSql(`UPDATE trips SET status = $1, updated_at = $2 WHERE id = $3;`, [targetCanonical, now, tripId]);
-
-    // Record status history entry in Postgres
-    const histId = `tsh-${crypto.randomUUID().slice(0, 8)}`;
-    await executeSql(
-      `INSERT INTO trip_status_history (id, trip_id, status, timestamp, note)
-       VALUES ($1, $2, $3, $4, $5);`,
-      [histId, tripId, targetCanonical, now, note || null]
-    );
 
     return trip;
   },
@@ -1230,13 +1479,13 @@ export const db = {
   },
 
   async saveTripLog(tripLog: TripLog): Promise<TripLog> {
-    dbState.tripLogs[tripLog.id] = tripLog;
     await executeSql(
       `INSERT INTO trip_logs (id, company_id, driver_id, driver_name, vehicle_id, trip_id, start_time, end_time, start_address, end_address, distance_km, duration_minutes, avg_speed_kmh, max_speed_kmh, path, status)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
        ON CONFLICT (id) DO UPDATE SET end_time = EXCLUDED.end_time, distance_km = EXCLUDED.distance_km, duration_minutes = EXCLUDED.duration_minutes, path = EXCLUDED.path;`,
       [tripLog.id, tripLog.companyId || null, tripLog.driverId || null, tripLog.driverName, tripLog.vehicleId || null, tripLog.tripId || null, tripLog.startTime, tripLog.endTime, tripLog.startAddress, tripLog.endAddress, tripLog.distanceKm, tripLog.durationMinutes, tripLog.avgSpeedKmH, tripLog.maxSpeedKmH, JSON.stringify(tripLog.path), tripLog.status || 'COMPLETED']
     );
+    dbState.tripLogs[tripLog.id] = tripLog;
     return tripLog;
   },
 
@@ -1263,13 +1512,13 @@ export const db = {
       revoked: false,
     };
 
-    dbState.invites[id] = invite;
-
     await executeSql(
       `INSERT INTO invites (id, company_id, code, token, role, created_at, expires_at, max_uses, used_count, revoked)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, FALSE);`,
       [invite.id, invite.companyId, invite.code, invite.token, invite.role, invite.createdAt, invite.expiresAt, invite.maxUses]
     );
+
+    dbState.invites[id] = invite;
 
     return invite;
   },
@@ -1290,14 +1539,15 @@ export const db = {
       timestamp: Date.now(),
       ...entry,
     };
-    dbState.auditLogs.unshift(log);
-    if (dbState.auditLogs.length > 500) dbState.auditLogs.pop();
 
     await executeSql(
       `INSERT INTO audit_logs (id, company_id, user_id, action, details, ip_address, timestamp)
        VALUES ($1, $2, $3, $4, $5, $6, $7);`,
       [log.id, log.companyId, log.userId || null, log.action, log.details, log.ipAddress || null, log.timestamp]
     );
+
+    dbState.auditLogs.unshift(log);
+    if (dbState.auditLogs.length > 500) dbState.auditLogs.pop();
 
     return log;
   },

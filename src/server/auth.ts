@@ -42,22 +42,6 @@ export function verifyToken(token: string): AuthUserPayload | null {
 }
 
 /**
- * Authentication middleware: Reads Authorization: Bearer <token>
- * If missing, permits optional guest mode if header is absent, but populates req.user if present.
- */
-export function optionalAuth(req: Request, _res: Response, next: NextFunction) {
-  const authHeader = req.headers.authorization;
-  if (authHeader && authHeader.startsWith('Bearer ')) {
-    const token = authHeader.split(' ')[1];
-    const decoded = verifyToken(token);
-    if (decoded) {
-      req.user = decoded;
-    }
-  }
-  next();
-}
-
-/**
  * Strict authentication middleware: Rejects requests without valid token
  */
 export function requireAuth(req: Request, res: Response, next: NextFunction) {

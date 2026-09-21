@@ -391,6 +391,63 @@ export const api = {
     return this.joinDriver(data);
   },
 
+  // ==================== PUBLIC FLEET & NETWORKS ====================
+  async fetchPublicVehicles(networkIds?: string[]): Promise<any[]> {
+    const params = new URLSearchParams();
+    if (networkIds && networkIds.length > 0) {
+      params.append('networkIds', networkIds.join(','));
+    }
+    const url = `/api/public/vehicles${params.toString() ? `?${params.toString()}` : ''}`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error('Failed to fetch public vehicles');
+    return res.json();
+  },
+
+  async fetchNetworks(): Promise<any[]> {
+    const res = await fetch('/api/networks');
+    if (!res.ok) throw new Error('Failed to fetch networks');
+    return res.json();
+  },
+
+  async setDriverBroadcasting(locationSharingEnabled: boolean, speedometerEnabled?: boolean, driverId?: string) {
+    const res = await fetch('/api/driver/broadcasting', {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify({ locationSharingEnabled, speedometerEnabled, driverId }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error?.message || 'Failed to update broadcasting state');
+    }
+    return res.json();
+  },
+
+  async driverJoinNetwork(joinCode: string, driverId?: string) {
+    const res = await fetch('/api/driver/join-network', {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify({ joinCode, driverId }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error?.message || 'Failed to join fleet network');
+    }
+    return res.json();
+  },
+
+  async driverLeaveNetwork(driverId?: string) {
+    const res = await fetch('/api/driver/leave-network', {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify({ driverId }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error?.message || 'Failed to disconnect from fleet');
+    }
+    return res.json();
+  },
+
   // ==================== ANALYTICS ====================
   async fetchAnalytics(companyId?: string) {
     const url = companyId ? `/api/analytics?companyId=${encodeURIComponent(companyId)}` : '/api/analytics';

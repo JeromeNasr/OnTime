@@ -1,12 +1,14 @@
 import React, { useEffect, useRef } from 'react';
 import L from 'leaflet';
-import { Driver, Trip } from '../types';
+import { Driver, Trip, PublicVehicle } from '../types';
 import { JBEIL_BOUNDS } from '../data/jbeilData';
 
 interface MapComponentProps {
   drivers?: Driver[];
+  publicVehicles?: PublicVehicle[];
   selectedDriverId?: string;
   onSelectDriver?: (driver: Driver) => void;
+  onSelectPublicVehicle?: (vehicle: PublicVehicle) => void;
   trips?: Trip[];
   currentTrip?: Trip | null;
   focusLocation?: { lat: number; lng: number } | null;
@@ -20,8 +22,10 @@ interface MapComponentProps {
 
 export const MapComponent: React.FC<MapComponentProps> = ({
   drivers = [],
+  publicVehicles = [],
   selectedDriverId,
   onSelectDriver,
+  onSelectPublicVehicle,
   trips = [],
   currentTrip,
   focusLocation,
@@ -197,6 +201,84 @@ export const MapComponent: React.FC<MapComponentProps> = ({
       `);
     });
 
+    // 2b. Render Public Vehicles (Customer Live Fleet Map)
+    publicVehicles.forEach((pv) => {
+      const isSelected = pv.id === selectedDriverId || pv.driverId === selectedDriverId;
+      const speedDisplay = Math.round(pv.location.speed || 0);
+      const isStale = pv.location.freshness === 'STALE';
+      const isOffline = pv.location.freshness === 'OFFLINE';
+
+      const markerColor = isOffline ? '#64748b' : isStale ? '#f59e0b' : '#10b981';
+
+      const markerHtml = `
+        <div class="relative flex flex-col items-center cursor-pointer select-none group">
+          <div class="w-8 h-8 rounded-full border-2 ${
+            isSelected ? 'border-white ring-2 ring-[#10b981]' : 'border-white/90'
+          } shadow-md flex items-center justify-center transition-transform" style="background-color: ${markerColor}; transform: rotate(${pv.location.heading || 0}deg);">
+            <svg class="w-4 h-4 text-white" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M12 2L4.5 20.29l.71.71L12 18l6.79 3 .71-.71z"/>
+            </svg>
+          </div>
+          <div class="mt-1 px-1.5 py-0.5 bg-[#0f172a] text-white text-[10px] font-semibold rounded border border-white/20 shadow whitespace-nowrap flex items-center gap-1">
+            <span>${pv.driverName.split(' ')[0]}</span>
+            ${speedDisplay > 0 ? `<span class="text-emerald-400 font-mono">${speedDisplay} km/h</span>` : ''}
+          </div>
+        </div>
+      `;
+
+      const customIcon = L.divIcon({
+        html: markerHtml,
+        className: 'custom-public-vehicle-marker',
+        iconSize: [80, 56],
+        iconAnchor: [40, 20],
+      });
+
+      const marker = L.marker([pv.location.lat, pv.location.lng], {
+        icon: customIcon,
+      }).addTo(layer);
+
+      marker.on('click', () => {
+        if (onSelectPublicVehicle) onSelectPublicVehicle(pv);
+      });
+
+      marker.bindPopup(`
+        <div class="p-1 text-slate-300 text-xs min-w-[200px]">
+          <div class="flex items-center justify-between gap-2 border-b border-slate-700 pb-1.5 mb-1.5">
+            <span class="font-bold text-white text-sm">${pv.driverName}</span>
+            <span class="px-1.5 py-0.5 rounded text-[10px] font-bold ${
+              isOffline ? 'bg-slate-700 text-slate-300' : isStale ? 'bg-amber-900/60 text-amber-300' : 'bg-emerald-900/60 text-emerald-300'
+            }">${pv.location.freshness || 'ONLINE'}</span>
+          </div>
+          <div class="text-[11px] text-slate-400 mb-1">
+            <span class="text-slate-200 font-medium">${pv.networkName || pv.networkCode}</span>
+          </div>
+          <div class="text-[11px] text-slate-300 mb-1">
+            ${pv.vehicleModel} • <span class="font-mono text-slate-100">${pv.plateNumber}</span>
+          </div>
+          <div class="flex items-center justify-between text-[11px] text-slate-300 pt-1 border-t border-slate-700/60">
+            <span>Speed: <strong class="text-emerald-400">${speedDisplay} km/h</strong></span>
+            <span>Bearing: ${Math.round(pv.location.heading || 0)}°</span>
+          </div>
+          ${pv.leadPhone ? `
+            <div class="mt-2 pt-1.5 border-t border-slate-700/60 flex items-center justify-between">
+              <span class="text-[10px] text-slate-400">Fleet Lead:</span>
+              <a href="tel:${pv.leadPhone}" class="text-[11px] font-medium text-sky-400 hover:underline flex items-center gap-1">
+                📞 ${pv.leadPhone}
+              </a>
+            </div>
+          ` : ''}
+          ${pv.phone ? `
+            <div class="mt-1 flex items-center justify-between">
+              <span class="text-[10px] text-slate-400">Driver Phone:</span>
+              <a href="tel:${pv.phone}" class="text-[11px] font-medium text-emerald-400 hover:underline flex items-center gap-1">
+                📞 ${pv.phone}
+              </a>
+            </div>
+          ` : ''}
+        </div>
+      `);
+    });
+
     // 3. Render Trips (Pickup & Dropoff)
     displayedTrips.forEach((trip) => {
       const pickupHtml = `
@@ -271,7 +353,7 @@ export const MapComponent: React.FC<MapComponentProps> = ({
     } else if (focusLocation) {
       map.panTo([focusLocation.lat, focusLocation.lng], { animate: true });
     }
-  }, [drivers, selectedDriverId, displayedTrips, currentActiveTrip, focusLocation, followDriver, userPosition, routePath]);
+  }, [drivers, publicVehicles, selectedDriverId, displayedTrips, currentTripToRender, focusLocation, followDriver, userPosition, routePath]);
 
   return (
     <div className={`relative w-full overflow-hidden ${className}`} style={{ height }}>

@@ -40,6 +40,10 @@ export interface Company {
   ownerName: string;
   ownerEmail: string;
   phone?: string;
+  leadPhone?: string;
+  leadDriverId?: string;
+  joinCode?: string;
+  isPublic?: boolean;
   createdAt: number;
   settings: {
     adaptiveGpsMovingSec: number;
@@ -49,9 +53,14 @@ export interface Company {
   };
 }
 
-// Backwards compatibility alias for Network
+// Backwards compatibility and primary Network entity
 export interface Network extends Company {
   leadDriverId?: string;
+  leadDriverName?: string;
+  leadPhone?: string;
+  joinCode?: string;
+  isPublic?: boolean;
+  activeVehicleCount?: number;
 }
 
 export interface Vehicle {
@@ -77,6 +86,7 @@ export interface DriverLocation {
   isCharging?: boolean;
   networkStatus?: 'wifi' | '4g' | '3g' | 'offline';
   isSimulated?: boolean;
+  isCalculatedSpeed?: boolean;
 }
 
 export interface Driver {
@@ -89,13 +99,45 @@ export interface Driver {
   vehicleModel: string; // denormalized for UI
   plateNumber: string; // denormalized for UI
   networkCode: string; // denormalized for UI
+  networkName?: string;
   isLeadDriver: boolean;
   status: DriverStatus;
+  locationSharingEnabled?: boolean;
+  speedometerEnabled?: boolean;
   currentLocation: DriverLocation;
   currentTripId?: string;
   totalTrips: number;
   rating: number;
   lastHeartbeat?: number;
+}
+
+/**
+ * Public Customer Vehicle representation for real-time map
+ */
+export interface PublicVehicle {
+  id: string;
+  driverId: string;
+  driverName: string;
+  phone?: string;
+  networkId: string;
+  networkCode: string;
+  networkName: string;
+  leadDriverName?: string;
+  leadPhone?: string;
+  vehicleModel: string;
+  plateNumber: string;
+  status: 'ONLINE' | 'LOCATION_OFF' | 'STALE' | 'OFFLINE';
+  location: {
+    lat: number;
+    lng: number;
+    speed: number;
+    heading: number;
+    accuracy: number;
+    timestamp: number;
+    isCalculatedSpeed?: boolean;
+    freshness: 'FRESH' | 'STALE' | 'OFFLINE';
+  };
+  locationSharingEnabled: boolean;
 }
 
 export interface TripStatusHistoryItem {

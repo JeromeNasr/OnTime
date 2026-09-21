@@ -1,6 +1,6 @@
 {
   "name": "North Lebanon Fleet Tracker",
-  "description": "Real-time university dorm transportation and fleet tracking system optimized for Jbeil (Byblos) and student dorm shuttles.",
+  "description": "Real-time vehicle and network tracking application showing live location, direction, speed, and estimated arrival time of participating vehicle networks.",
   "requestFramePermissions": ["geolocation"],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
