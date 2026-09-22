@@ -403,9 +403,55 @@ export const api = {
     return res.json();
   },
 
+  async fetchPublicNetworks(): Promise<any[]> {
+    const res = await fetch('/api/public/networks');
+    if (!res.ok) throw new Error('Failed to fetch public networks');
+    return res.json();
+  },
+
   async fetchNetworks(): Promise<any[]> {
     const res = await fetch('/api/networks');
     if (!res.ok) throw new Error('Failed to fetch networks');
+    return res.json();
+  },
+
+  async createNetwork(data: { name: string; ownerName?: string; leadPhone?: string; joinCode?: string }): Promise<any> {
+    const res = await fetch('/api/networks', {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error?.message || 'Failed to create fleet network');
+    }
+    return res.json();
+  },
+
+  async fetchPublicEta(data: {
+    vehicleLat: number;
+    vehicleLng: number;
+    vehicleSpeed?: number | null;
+    customerLat: number;
+    customerLng: number;
+    vehicleId?: string;
+  }): Promise<{
+    etaMinutes: number;
+    roadDistanceKm: number;
+    polyline: [number, number][];
+    trafficLevel?: string;
+    trafficAssessmentBasis?: string;
+    source?: string;
+  }> {
+    const res = await fetch('/api/public/eta', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error?.message || 'Failed to calculate ETA');
+    }
     return res.json();
   },
 

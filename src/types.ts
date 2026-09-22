@@ -78,8 +78,8 @@ export interface Vehicle {
 export interface DriverLocation {
   lat: number;
   lng: number;
-  speed: number; // km/h
-  heading: number; // degrees 0-360
+  speed: number | null; // km/h (null if unavailable or disabled)
+  heading: number | null; // degrees 0-360 (null if unavailable)
   accuracy: number; // meters
   timestamp: number;
   batteryLevel?: number; // percentage 0-100
@@ -130,14 +130,15 @@ export interface PublicVehicle {
   location: {
     lat: number;
     lng: number;
-    speed: number;
-    heading: number;
-    accuracy: number;
+    speed: number | null;
+    heading: number | null;
+    accuracy: number | null;
     timestamp: number;
     isCalculatedSpeed?: boolean;
     freshness: 'FRESH' | 'STALE' | 'OFFLINE';
   };
   locationSharingEnabled: boolean;
+  speedometerEnabled?: boolean;
 }
 
 export interface TripStatusHistoryItem {

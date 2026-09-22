@@ -391,9 +391,23 @@ async function startServer() {
 
   // ==================== COMPANIES & NETWORKS ====================
 
-  app.get('/api/networks', (_req, res) => {
-    res.json(db.listPublicNetworks());
-  });
+  const listPublicNetworksHandler = (_req: express.Request, res: express.Response) => {
+    const rawNetworks = db.listPublicNetworks();
+    const publicNetworks = rawNetworks.map((net) => ({
+      id: net.id,
+      code: net.code,
+      name: net.name,
+      ownerName: net.ownerName,
+      leadDriverName: net.leadDriverName,
+      leadPhone: net.settings?.enablePublicDriverPhone === true ? net.leadPhone : undefined,
+      activeVehicleCount: net.activeVehicleCount ?? 0,
+      createdAt: net.createdAt,
+    }));
+    res.json(publicNetworks);
+  };
+
+  app.get('/api/networks', listPublicNetworksHandler);
+  app.get('/api/public/networks', listPublicNetworksHandler);
 
   app.get('/api/networks/:code', (req, res) => {
     const net = db.getNetworkByJoinCode(req.params.code) || db.getCompany(req.params.code);
@@ -407,19 +421,25 @@ async function startServer() {
     res.json(db.listCompanies());
   });
 
-  app.post('/api/networks', async (req, res) => {
+  app.post('/api/networks', requireAuth, async (req, res) => {
+    if (req.user!.role !== 'LEAD_DRIVER' && req.user!.role !== 'OWNER') {
+      return res.status(403).json({
+        error: { code: 'FORBIDDEN', message: 'Only authorized lead drivers or fleet owners can create networks' },
+      });
+    }
+
     const { name, ownerName, ownerEmail, phone, leadPhone, joinCode } = req.body;
-    if (!name || !ownerName) {
-      return res.status(400).json({ error: { code: 'INVALID_INPUT', message: 'Network name and owner name required' } });
+    if (!name) {
+      return res.status(400).json({ error: { code: 'INVALID_INPUT', message: 'Network name is required' } });
     }
     const cleanJoinCode = joinCode ? String(joinCode).trim().toUpperCase() : String(crypto.randomInt(100000, 999999));
     const comp = await db.createCompany({
       code: `NET-${crypto.randomInt(100, 999)}`,
       name: name.trim(),
-      ownerName: ownerName.trim(),
-      ownerEmail: ownerEmail || `${name.toLowerCase().replace(/[^a-z0-9]/g, '')}@northlebanonfleet.lb`,
-      phone: phone || leadPhone || '+961 70 000 000',
-      leadPhone: leadPhone || phone,
+      ownerName: (ownerName || req.user!.name).trim(),
+      ownerEmail: ownerEmail || req.user!.email || `${name.toLowerCase().replace(/[^a-z0-9]/g, '')}@northlebanonfleet.lb`,
+      phone: phone || leadPhone || req.user!.phone || '+961 70 000 000',
+      leadPhone: leadPhone || phone || req.user!.phone,
       joinCode: cleanJoinCode,
       isPublic: true,
     });
@@ -431,6 +451,16 @@ async function startServer() {
     if (!leadDriverId) {
       return res.status(400).json({ error: { code: 'INVALID_INPUT', message: 'Lead driver ID required' } });
     }
+    const comp = db.getCompany(req.params.id);
+    if (!comp) {
+      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Network not found' } });
+    }
+    if (req.user!.companyId !== comp.id && req.user!.role !== 'OWNER') {
+      return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Unauthorized to manage this network' } });
+    }
+    if (req.user!.companyId !== comp.id) {
+      return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Cannot modify lead driver of another network' } });
+    }
     const updated = await db.updateNetworkLead(req.params.id, leadDriverId, leadPhone);
     if (!updated) {
       return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Network not found' } });
@@ -438,7 +468,10 @@ async function startServer() {
     res.json(updated);
   });
 
-  app.post('/api/companies', async (req, res) => {
+  app.post('/api/companies', requireAuth, async (req, res) => {
+    if (req.user!.role !== 'OWNER') {
+      return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Owner privileges required' } });
+    }
     const { name, ownerName, ownerEmail } = req.body;
     if (!name || !ownerName) {
       return res.status(400).json({ error: { code: 'INVALID_INPUT', message: 'Company name and owner name required' } });
@@ -469,6 +502,58 @@ async function startServer() {
     const networkIds = networkParam ? networkParam.split(',').map((s) => s.trim()).filter(Boolean) : undefined;
     const vehicles = db.listPublicVehicles(networkIds);
     res.json(vehicles);
+  });
+
+  // Standalone Public ETA Endpoint (Zero Trip / Zero Order dependency)
+  app.post('/api/public/eta', async (req, res) => {
+    const { vehicleLat, vehicleLng, vehicleSpeed, customerLat, customerLng, vehicleId } = req.body;
+
+    const vLat = Number(vehicleLat);
+    const vLng = Number(vehicleLng);
+    const cLat = Number(customerLat);
+    const cLng = Number(customerLng);
+
+    if (isNaN(vLat) || isNaN(vLng) || isNaN(cLat) || isNaN(cLng)) {
+      return res.status(400).json({
+        error: { code: 'INVALID_COORDINATES', message: 'Valid vehicle and customer latitude/longitude are required' },
+      });
+    }
+
+    try {
+      const etaResult = await calculateDynamicEta({
+        tripId: vehicleId ? `public-eta-${vehicleId}` : undefined,
+        driverLocation: {
+          lat: vLat,
+          lng: vLng,
+          speed: typeof vehicleSpeed === 'number' && !isNaN(vehicleSpeed) ? Math.max(0, vehicleSpeed) : 35,
+        },
+        destinationCoords: {
+          lat: cLat,
+          lng: cLng,
+        },
+      });
+
+      res.json({
+        etaMinutes: etaResult.etaMinutes,
+        roadDistanceKm: etaResult.roadDistanceKm,
+        polyline: etaResult.polyline,
+        trafficLevel: etaResult.trafficLevel,
+        trafficAssessmentBasis: etaResult.trafficAssessmentBasis,
+        source: etaResult.source,
+      });
+    } catch (err) {
+      console.warn('Public ETA calculation error, using fallback:', err);
+      const distKm = haversineKm(vLat, vLng, cLat, cLng);
+      const estMinutes = Math.max(1, Math.round((distKm / 35) * 60) + 2);
+      res.json({
+        etaMinutes: estMinutes,
+        roadDistanceKm: Math.round(distKm * 10) / 10,
+        polyline: [[vLat, vLng], [cLat, cLng]],
+        trafficLevel: 'Normal',
+        trafficAssessmentBasis: 'Direct distance estimate (road routing unavailable)',
+        source: 'STRAIGHT_LINE_FALLBACK',
+      });
+    }
   });
 
   // ==================== DRIVERS & FLEET ====================
@@ -549,6 +634,12 @@ async function startServer() {
       driverId = drv ? drv.id : req.user!.id;
     } else {
       driverId = req.body.driverId;
+      if (driverId) {
+        const targetDriver = db.getDriver(driverId);
+        if (!targetDriver || targetDriver.companyId !== req.user!.companyId) {
+          return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Cannot modify broadcasting for driver belonging to another company' } });
+        }
+      }
     }
 
     if (!driverId) {
@@ -592,6 +683,12 @@ async function startServer() {
       driverId = drv ? drv.id : req.user!.id;
     } else {
       driverId = req.body.driverId;
+      if (driverId) {
+        const targetDriver = db.getDriver(driverId);
+        if (!targetDriver || targetDriver.companyId !== req.user!.companyId) {
+          return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Cannot remove driver belonging to another company' } });
+        }
+      }
     }
 
     if (!driverId) {
@@ -757,12 +854,14 @@ async function startServer() {
     }
     cleanSpeed = Math.min(150, Math.max(0, cleanSpeed || 0));
 
+    const cleanHeading = (heading !== undefined && heading !== null && !isNaN(Number(heading))) ? Number(heading) : null;
+
     try {
       const updated = await db.updateDriverLocation(driverId, {
         lat: numLat,
         lng: numLng,
         speed: cleanSpeed,
-        heading: Number(heading) || 0,
+        heading: cleanHeading,
         accuracy: Math.min(200, Number(accuracy) || 5),
         timestamp: pingTimestamp,
         batteryLevel: batteryLevel !== undefined ? Number(batteryLevel) : undefined,
@@ -786,18 +885,24 @@ async function startServer() {
       if (updated.locationSharingEnabled !== false) {
         const comp = updated.companyId ? db.getCompany(updated.companyId) : null;
         const vehicle = updated.vehicleId ? db.getVehicle(updated.vehicleId) : null;
-        const speedDisplay = (updated.speedometerEnabled !== false) ? Math.round(updated.currentLocation.speed || 0) : 0;
+        const speedDisplay = (updated.speedometerEnabled !== false)
+          ? (typeof updated.currentLocation.speed === 'number' && !isNaN(updated.currentLocation.speed) ? Math.round(updated.currentLocation.speed) : null)
+          : null;
+
+        const headingDisplay = (typeof updated.currentLocation.heading === 'number' && !isNaN(updated.currentLocation.heading))
+          ? updated.currentLocation.heading
+          : null;
 
         const publicVehicleItem = {
           id: `veh-${updated.id}`,
           driverId: updated.id,
           driverName: updated.name,
-          phone: comp?.settings?.enablePublicDriverPhone !== false ? updated.phone : undefined,
+          phone: comp?.settings?.enablePublicDriverPhone === true ? updated.phone : undefined,
           networkId: updated.companyId,
           networkCode: updated.networkCode,
           networkName: updated.networkName || comp?.name || updated.networkCode,
           leadDriverName: comp?.ownerName,
-          leadPhone: comp?.leadPhone || comp?.phone,
+          leadPhone: comp?.settings?.enablePublicDriverPhone === true ? (comp?.leadPhone || comp?.phone) : undefined,
           vehicleModel: vehicle?.makeModel || updated.vehicleModel || 'Taxi Sedan',
           plateNumber: vehicle?.plateNumber || updated.plateNumber || 'Public Taxi',
           status: 'ONLINE',
@@ -805,13 +910,14 @@ async function startServer() {
             lat: updated.currentLocation.lat,
             lng: updated.currentLocation.lng,
             speed: speedDisplay,
-            heading: updated.currentLocation.heading || 0,
-            accuracy: updated.currentLocation.accuracy || 5,
+            heading: headingDisplay,
+            accuracy: updated.currentLocation.accuracy ?? null,
             timestamp: updated.currentLocation.timestamp,
             isCalculatedSpeed: isCalculatedSpeed || updated.currentLocation.isCalculatedSpeed,
             freshness: 'FRESH',
           },
           locationSharingEnabled: true,
+          speedometerEnabled: updated.speedometerEnabled !== false,
         };
         io.to('public_fleet').emit('vehicle:location:update', publicVehicleItem);
       } else {
@@ -906,11 +1012,13 @@ async function startServer() {
       const ptSpeed = Number(pt.speed) || 0;
       if (ptSpeed > 180 || ptSpeed < 0) continue;
 
+      const ptHeading = (pt.heading !== undefined && pt.heading !== null && !isNaN(Number(pt.heading))) ? Number(pt.heading) : null;
+
       validPoints.push({
         lat,
         lng,
         speed: Math.min(150, Math.max(0, ptSpeed)),
-        heading: Number(pt.heading) || 0,
+        heading: ptHeading,
         accuracy: Math.min(200, Number(pt.accuracy) || 5),
         timestamp: ptTime,
         batteryLevel: pt.batteryLevel !== undefined ? Number(pt.batteryLevel) : undefined,

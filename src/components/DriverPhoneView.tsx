@@ -13,6 +13,9 @@ import {
   AlertCircle,
   Clock,
   Car,
+  Eye,
+  EyeOff,
+  Gauge,
 } from 'lucide-react';
 import { Driver, Trip, TripStatus } from '../types';
 import { SpeedometerGauge } from './SpeedometerGauge';
@@ -37,6 +40,8 @@ interface DriverPhoneViewProps {
   onEndTrip: () => void;
   onUpdateTripStatus: (tripId: string, status: TripStatus) => void;
   onToggleStatus: (status: Driver['status']) => void;
+  onToggleLocationSharing?: (enabled: boolean) => void;
+  onToggleSpeedometer?: (enabled: boolean) => void;
 }
 
 export const DriverPhoneView: React.FC<DriverPhoneViewProps> = ({
@@ -47,6 +52,8 @@ export const DriverPhoneView: React.FC<DriverPhoneViewProps> = ({
   onEndTrip,
   onUpdateTripStatus,
   onToggleStatus,
+  onToggleLocationSharing,
+  onToggleSpeedometer,
 }) => {
   // Tracking Mode: Real Phone GPS (Default for real operations) vs Demo Campus Route
   const [gpsMode, setGpsMode] = useState<'real' | 'simulated'>('real');
@@ -332,6 +339,67 @@ export const DriverPhoneView: React.FC<DriverPhoneViewProps> = ({
         >
           Simulated Route
         </button>
+      </div>
+
+      {/* Broadcasting Privacy Controls: Location Sharing & Speedometer Toggle */}
+      <div className="bg-[#13131a] border border-white/[0.06] rounded-xl p-3 flex flex-col sm:flex-row items-center justify-between gap-2.5">
+        {/* Location Sharing Toggle */}
+        <div className="w-full sm:w-auto flex items-center justify-between sm:justify-start gap-3">
+          <div className="flex items-center gap-2">
+            {currentDriver.locationSharingEnabled !== false ? (
+              <Eye className="w-4 h-4 text-emerald-400" />
+            ) : (
+              <EyeOff className="w-4 h-4 text-rose-400" />
+            )}
+            <div>
+              <div className="text-xs font-medium text-white">Public Map Visibility</div>
+              <div className="text-[10px] text-[#64748b]">
+                {currentDriver.locationSharingEnabled !== false ? 'Broadcasting live on customer map' : 'Hidden from public map'}
+              </div>
+            </div>
+          </div>
+          {onToggleLocationSharing && (
+            <button
+              id="btn-toggle-location-sharing"
+              type="button"
+              onClick={() => onToggleLocationSharing(currentDriver.locationSharingEnabled === false)}
+              className={`px-2.5 py-1 text-xs font-semibold rounded-lg transition-colors cursor-pointer ${
+                currentDriver.locationSharingEnabled !== false
+                  ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/30'
+                  : 'bg-rose-500/20 text-rose-400 border border-rose-500/30 hover:bg-rose-500/30'
+              }`}
+            >
+              {currentDriver.locationSharingEnabled !== false ? 'Live ON' : 'Paused'}
+            </button>
+          )}
+        </div>
+
+        {/* Speedometer Telemetry Toggle */}
+        <div className="w-full sm:w-auto flex items-center justify-between sm:justify-start gap-3 pt-2 sm:pt-0 border-t sm:border-t-0 border-white/[0.06]">
+          <div className="flex items-center gap-2">
+            <Gauge className={`w-4 h-4 ${currentDriver.speedometerEnabled !== false ? 'text-blue-400' : 'text-[#64748b]'}`} />
+            <div>
+              <div className="text-xs font-medium text-white">Speedometer</div>
+              <div className="text-[10px] text-[#64748b]">
+                {currentDriver.speedometerEnabled !== false ? 'Speed visible to public' : 'Speed telemetry hidden'}
+              </div>
+            </div>
+          </div>
+          {onToggleSpeedometer && (
+            <button
+              id="btn-toggle-speedometer"
+              type="button"
+              onClick={() => onToggleSpeedometer(currentDriver.speedometerEnabled === false)}
+              className={`px-2.5 py-1 text-xs font-semibold rounded-lg transition-colors cursor-pointer ${
+                currentDriver.speedometerEnabled !== false
+                  ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30 hover:bg-blue-500/30'
+                  : 'bg-white/10 text-slate-400 border border-white/10 hover:bg-white/15'
+              }`}
+            >
+              {currentDriver.speedometerEnabled !== false ? 'Speed ON' : 'Speed OFF'}
+            </button>
+          )}
+        </div>
       </div>
 
       {gpsError && (

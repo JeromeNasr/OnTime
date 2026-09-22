@@ -795,7 +795,7 @@ export const db = {
         adaptiveGpsMovingSec: 3,
         adaptiveGpsStoppedSec: 25,
         speedLimitKmH: 80,
-        enablePublicDriverPhone: true,
+        enablePublicDriverPhone: false,
       },
     };
 
@@ -1152,18 +1152,23 @@ export const db = {
       const vehicleModel = vehicle?.makeModel || driver.vehicleModel || 'Taxi Sedan';
       const plateNumber = vehicle?.plateNumber || driver.plateNumber || 'Public Taxi';
 
-      const speed = (driver.speedometerEnabled !== false) ? Math.round(loc.speed || 0) : 0;
+      const speed = (driver.speedometerEnabled !== false)
+        ? (typeof loc.speed === 'number' && !isNaN(loc.speed) ? Math.round(loc.speed) : null)
+        : null;
+
+      const heading = (typeof loc.heading === 'number' && !isNaN(loc.heading)) ? loc.heading : null;
+      const accuracy = (typeof loc.accuracy === 'number' && !isNaN(loc.accuracy)) ? loc.accuracy : null;
 
       vehicles.push({
         id: `veh-${driver.id}`,
         driverId: driver.id,
         driverName: driver.name,
-        phone: comp.settings?.enablePublicDriverPhone !== false ? driver.phone : undefined,
+        phone: comp.settings?.enablePublicDriverPhone === true ? driver.phone : undefined,
         networkId: comp.id,
         networkCode: comp.code,
         networkName: comp.name,
         leadDriverName: comp.ownerName,
-        leadPhone: comp.leadPhone || comp.phone,
+        leadPhone: comp.settings?.enablePublicDriverPhone === true ? (comp.leadPhone || comp.phone) : undefined,
         vehicleModel,
         plateNumber,
         status,
@@ -1171,13 +1176,14 @@ export const db = {
           lat: loc.lat,
           lng: loc.lng,
           speed,
-          heading: loc.heading || 0,
-          accuracy: loc.accuracy || 5,
+          heading,
+          accuracy,
           timestamp: loc.timestamp,
           isCalculatedSpeed: loc.isCalculatedSpeed,
           freshness,
         },
         locationSharingEnabled: true,
+        speedometerEnabled: driver.speedometerEnabled !== false,
       });
     }
 

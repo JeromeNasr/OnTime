@@ -11,10 +11,10 @@ import {
   WifiOff,
   UserCheck,
 } from 'lucide-react';
-import { Driver, Trip, TripStatus, Network, TripLog } from './types';
+import { Driver, Trip, TripStatus, Network, TripLog, UserRole } from './types';
 import { DriverPhoneView } from './components/DriverPhoneView';
 import { LeadDriverDispatchView } from './components/LeadDriverDispatchView';
-import { StudentTrackingView } from './components/StudentTrackingView';
+import { CustomerLiveMap } from './components/CustomerLiveMap';
 import { CompanyDashboardView } from './components/CompanyDashboardView';
 import { NetworkSwitcherModal } from './components/NetworkSwitcherModal';
 import { TripHistoryModal } from './components/TripHistoryModal';
@@ -23,8 +23,8 @@ import { getSocket, joinCompanyRoom, joinDriverRoom } from './services/socket';
 import { api, getHeaders, getStoredToken } from './services/api';
 
 export default function App() {
-  // Navigation tabs: Driver Phone, Lead Dispatcher, Customer Live Tracking, Fleet Dashboard
-  const [activeTab, setActiveTab] = useState<'driver' | 'lead' | 'customer' | 'company'>('driver');
+  // Navigation tabs: Customer Live Map (Default), Driver Phone, Lead Dispatcher, Fleet Dashboard
+  const [activeTab, setActiveTab] = useState<'customer' | 'driver' | 'lead' | 'company'>('customer');
   const [initialTrackingCode, setInitialTrackingCode] = useState<string>('TRK-8821');
 
   // Network & Entities State
@@ -79,12 +79,18 @@ export default function App() {
   const fetchAllData = useCallback(async () => {
     try {
       const headers = getHeaders();
-      const [netRes, drvRes, ordRes, tripRes] = await Promise.all([
-        fetch('/api/networks').catch(() => null),
-        fetch(`/api/drivers?networkCode=${currentNetwork.code}`, { headers }).catch(() => null),
-        fetch(`/api/trips?networkCode=${currentNetwork.code}`, { headers }).catch(() => null),
-        fetch(`/api/trips/history?networkCode=${currentNetwork.code}`, { headers }).catch(() => null),
-      ]);
+      const token = getStoredToken();
+      const requests: Promise<any>[] = [fetch('/api/networks').catch(() => null)];
+
+      if (token) {
+        requests.push(
+          fetch(`/api/drivers?networkCode=${currentNetwork.code}`, { headers }).catch(() => null),
+          fetch(`/api/trips?networkCode=${currentNetwork.code}`, { headers }).catch(() => null),
+          fetch(`/api/trips/history?networkCode=${currentNetwork.code}`, { headers }).catch(() => null)
+        );
+      }
+
+      const [netRes, drvRes, ordRes, tripRes] = await Promise.all(requests);
 
       if (netRes && netRes.ok) {
         const netData = await netRes.json();
@@ -117,17 +123,19 @@ export default function App() {
 
   useEffect(() => {
     async function initAuthAndFetch() {
-      if (!getStoredToken()) {
+      // Only authenticate if user navigates to an operational role tab (Driver, Dispatcher, Fleet)
+      if (activeTab !== 'customer' && !getStoredToken()) {
         try {
-          await api.loginDemo('OWNER', currentNetwork.code);
+          const role: UserRole = activeTab === 'driver' ? 'DRIVER' : activeTab === 'lead' ? 'LEAD_DRIVER' : 'OWNER';
+          await api.loginDemo(role, currentNetwork.code);
         } catch (err) {
-          console.warn('Initial demo auth failed:', err);
+          console.warn('Role demo auth failed:', err);
         }
       }
       fetchAllData();
     }
     initAuthAndFetch();
-  }, [fetchAllData, currentNetwork.code]);
+  }, [fetchAllData, currentNetwork.code, activeTab]);
 
   // 3. Socket.IO Real-time Connection & Event Listeners
   useEffect(() => {
@@ -379,6 +387,38 @@ export default function App() {
     );
   };
 
+  const handleToggleLocationSharing = async (enabled: boolean) => {
+    setDrivers((prev) =>
+      prev.map((d) => (d.id === currentDriver.id ? { ...d, locationSharingEnabled: enabled } : d))
+    );
+    try {
+      const headers = getHeaders();
+      await fetch(`/api/drivers/${currentDriver.id}/location-sharing`, {
+        method: 'PATCH',
+        headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled }),
+      });
+    } catch (err) {
+      console.error('Error toggling location sharing:', err);
+    }
+  };
+
+  const handleToggleSpeedometer = async (enabled: boolean) => {
+    setDrivers((prev) =>
+      prev.map((d) => (d.id === currentDriver.id ? { ...d, speedometerEnabled: enabled } : d))
+    );
+    try {
+      const headers = getHeaders();
+      await fetch(`/api/drivers/${currentDriver.id}/speedometer`, {
+        method: 'PATCH',
+        headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled }),
+      });
+    } catch (err) {
+      console.error('Error toggling speedometer:', err);
+    }
+  };
+
   const handleCreateNetwork = async (name: string, ownerName: string) => {
     try {
       const res = await fetch('/api/networks', {
@@ -512,9 +552,9 @@ export default function App() {
       <div className="border-b border-white/[0.06] bg-[#0a0a0f] sticky top-[52px] z-30 px-4 sm:px-6">
         <div className="max-w-7xl mx-auto flex items-center gap-8">
           {[
+            { id: 'customer', label: 'Live Map', icon: MapPin },
             { id: 'driver', label: 'Driver Phone', icon: Car },
             { id: 'lead', label: 'Dispatcher', icon: Navigation },
-            { id: 'customer', label: 'Student Tracking', icon: MapPin },
             { id: 'company', label: 'Fleet Overview', icon: LayoutDashboard },
           ].map((tab) => {
             const Icon = tab.icon;
@@ -523,7 +563,7 @@ export default function App() {
               <button
                 key={tab.id}
                 id={`tab-${tab.id}`}
-                onClick={() => setActiveTab(tab.id as 'driver' | 'lead' | 'customer' | 'company')}
+                onClick={() => setActiveTab(tab.id as 'customer' | 'driver' | 'lead' | 'company')}
                 className={`py-3 text-xs font-medium transition-colors relative flex items-center gap-1.5 ${
                   isActive ? 'text-white' : 'text-[#94a3b8] hover:text-white'
                 }`}
@@ -540,8 +580,23 @@ export default function App() {
       </div>
 
       {/* Main View Container */}
-      <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 flex flex-col">
-        {/* Tab 1: Driver Mobile Cockpit */}
+      <main className={`flex-1 w-full flex flex-col ${activeTab === 'customer' ? 'p-0' : 'max-w-7xl mx-auto p-4 sm:p-6'}`}>
+        {/* Tab 1: Customer Public Live Map (Primary Experience) */}
+        {activeTab === 'customer' && (
+          <div className="w-full flex-1 h-[calc(100vh-92px)]">
+            <CustomerLiveMap
+              initialNetworkCode={currentNetwork.code}
+              onOpenDriverPhone={() => setActiveTab('driver')}
+              onOpenFleetPortal={() => setActiveTab('company')}
+              onSelectNetwork={(code) => {
+                const match = networks.find((n) => n.code === code);
+                if (match) setCurrentNetwork(match);
+              }}
+            />
+          </div>
+        )}
+
+        {/* Tab 2: Driver Mobile Cockpit */}
         {activeTab === 'driver' && (
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
             <div className="lg:col-span-6">
@@ -553,6 +608,8 @@ export default function App() {
                 onEndTrip={handleEndTrip}
                 onUpdateTripStatus={handleUpdateTripStatus}
                 onToggleStatus={handleToggleDriverStatus}
+                onToggleLocationSharing={handleToggleLocationSharing}
+                onToggleSpeedometer={handleToggleSpeedometer}
               />
             </div>
 
@@ -571,7 +628,7 @@ export default function App() {
           </div>
         )}
 
-        {/* Tab 2: Lead Driver Dispatch Console */}
+        {/* Tab 3: Lead Driver Dispatch Console */}
         {activeTab === 'lead' && (
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
             <div className="lg:col-span-7">
@@ -579,6 +636,7 @@ export default function App() {
                 currentDriver={currentDriver}
                 drivers={drivers}
                 trips={trips}
+                network={currentNetwork}
                 onCreateTrip={handleCreateTrip}
                 onAssignTrip={handleAssignTrip}
                 onSelectDriverForMap={(drv) => setMapSelectedDriver(drv)}
@@ -596,13 +654,6 @@ export default function App() {
               />
             </div>
           </div>
-        )}
-
-        {/* Tab 3: Student Live Tracking View */}
-        {activeTab === 'customer' && (
-          <StudentTrackingView
-            initialTrackingCode={initialTrackingCode}
-          />
         )}
 
         {/* Tab 4: Fleet Company Central Dashboard */}
@@ -630,9 +681,9 @@ export default function App() {
       {/* Persistent Mobile Bottom Navigation Bar */}
       <nav className="sm:hidden fixed bottom-0 left-0 right-0 z-50 bg-[#0a0a0f]/95 backdrop-blur-md border-t border-white/[0.06] px-4 py-2 flex items-center justify-around">
         {[
+          { id: 'customer', label: 'Live Map', icon: MapPin },
           { id: 'driver', label: 'Driver', icon: Car },
           { id: 'lead', label: 'Dispatch', icon: Navigation },
-          { id: 'customer', label: 'Student', icon: MapPin },
           { id: 'company', label: 'Fleet', icon: LayoutDashboard },
         ].map((item) => {
           const Icon = item.icon;
@@ -640,7 +691,7 @@ export default function App() {
           return (
             <button
               key={item.id}
-              onClick={() => setActiveTab(item.id as 'driver' | 'lead' | 'customer' | 'company')}
+              onClick={() => setActiveTab(item.id as 'customer' | 'driver' | 'lead' | 'company')}
               className={`flex flex-col items-center gap-1 text-[11px] font-medium transition-colors ${
                 isActive ? 'text-white' : 'text-[#94a3b8]'
               }`}
