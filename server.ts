@@ -1,3 +1,8 @@
+// Load environment variables BEFORE anything else: src/server/db.ts reads
+// process.env.DATABASE_URL and src/server/auth.ts reads process.env.JWT_SECRET
+// at module-import time, so .env must be applied first. Shell/CI variables win.
+import './src/server/env';
+
 import express from 'express';
 import http from 'http';
 import path from 'path';
@@ -8,7 +13,7 @@ import bcrypt from 'bcryptjs';
 import helmet from 'helmet';
 import cors from 'cors';
 
-import { db } from './src/server/db';
+import { db, initDatabase, isDatabaseInitialized, getDatabaseMode } from './src/server/db';
 import {
   generateToken,
   requireAuth,
@@ -20,6 +25,18 @@ import { calculateDynamicEta, EtaCalculationResult } from './src/server/eta';
 import { Trip, DriverLocation, TripStatus, PublicTrackingResponse, StudentTrackingState } from './src/types';
 
 async function startServer() {
+  // Required initialization happens BEFORE the server can accept any request:
+  //   load environment (first import above)
+  //   -> connect to PostgreSQL -> schema/migrations -> seed when empty
+  //   -> hydrate in-memory state -> only then build routes and listen.
+  // In production a database failure rejects here; startServer() below exits the
+  // process instead of reporting a healthy server.
+  await initDatabase();
+
+  if (!isDatabaseInitialized()) {
+    throw new Error('Server startup aborted: database initialization did not complete.');
+  }
+
   const isDriverRole = (role?: string): boolean => role === 'DRIVER' || role === 'LEAD_DRIVER';
   const app = express();
   const PORT = 3000;
@@ -214,13 +231,16 @@ async function startServer() {
     });
   });
 
-  // Health check
+  // Health check — reports the real persistence mode: 'postgresql' is the
+  // authoritative store; 'memory' is the explicit development-only fallback
+  // (data is not persisted) and can never occur with NODE_ENV=production.
   app.get('/api/health', async (_req, res) => {
     const health = await db.checkHealth();
     if (!health.healthy) {
       return res.status(503).json({
         status: 'unhealthy',
         database: 'disconnected',
+        persistence: health.mode,
         error: health.error,
         service: 'ONTime Fleet Tracking Platform',
         version: '2.0.0-production',
@@ -228,8 +248,10 @@ async function startServer() {
       });
     }
     res.json({
-      status: 'ok',
-      database: 'connected',
+      status: health.mode === 'memory' ? 'ok-in-memory-fallback' : 'ok',
+      database: health.postgres ? 'connected' : 'not-configured',
+      persistence: health.mode,
+      ...(health.error ? { warning: health.error } : {}),
       service: 'ONTime Fleet Tracking Platform',
       version: '2.0.0-production',
       region: 'Jbeil (Byblos) University Dorm Corridor',
@@ -1636,8 +1658,13 @@ async function startServer() {
   }
 
   httpServer.listen(PORT, '0.0.0.0', () => {
-    console.log(`ONTime Fleet Platform server running on http://0.0.0.0:${PORT}`);
+    console.log(
+      `ONTime Fleet Platform server running on http://0.0.0.0:${PORT} (persistence=${getDatabaseMode()})`
+    );
   });
 }
 
-startServer();
+startServer().catch((err) => {
+  console.error('FATAL: server failed to start:', err instanceof Error ? err.message : err);
+  process.exit(1);
+});
