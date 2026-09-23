@@ -1,0 +1,20 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "default_agent": "build",
+  "instructions": [
+    "Always use 'bun' instead of 'npm' or 'yarn' for package installation and scripts.",
+    "This project uses Tailwind CSS v4, React, TypeScript, Express, Socket.IO, and Leaflet maps.",
+    "When modifying maps, always use free tile providers without restricted API keys (such as Esri Dark Canvas or CartoDB Voyager).",
+    "Never commit sensitive credentials; always reference .env or .env.example."
+  ],
+  "mcp": {
+    "puppeteer": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-puppeteer"]
+    },
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"]
+    }
+  }
+}
