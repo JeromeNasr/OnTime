@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import pg from 'pg';
+import { applyMigrations } from './schema';
 import {
   User,
   Company,
@@ -97,22 +98,91 @@ const dbState: DatabaseSchema = {
   auditLogs: [],
 };
 
-// PostgreSQL Connection Pool
-const pool = new pg.Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
-  max: 10,
-  idleTimeoutMillis: 30000,
-});
+// ==================== PERSISTENCE MODE ====================
+//
+// PostgreSQL is the authoritative persistent store for this application.
+// initDatabase() establishes exactly one of two explicit modes:
+//
+//   'postgresql' — connected, schema/migrations applied, state hydrated.
+//                  Reads are served from the hydrated cache and every write
+//                  goes to PostgreSQL first: if the write fails, the operation
+//                  fails and in-memory state is left untouched.
+//   'memory'     — development-only fallback used when no database is
+//                  reachable/configured. PostgreSQL is not touched at all, so
+//                  reads and writes are consistent (both served from process
+//                  memory) and nothing silently pretends to be persisted.
+//
+// There is deliberately NO "memory reads + PostgreSQL writes" state.
+export type DatabaseMode = 'postgresql' | 'memory';
 
-pool.on('error', (err) => {
-  console.error('Unexpected error on idle PostgreSQL client:', err);
-});
+let databaseMode: DatabaseMode = 'memory';
+let initializationFinished = false;
+let initializationPromise: Promise<void> | null = null;
+let pruneTimer: NodeJS.Timeout | null = null;
+
+/** Current persistence mode. In production this is always 'postgresql'. */
+export function getDatabaseMode(): DatabaseMode {
+  return databaseMode;
+}
+
+/** True once initialization completed successfully (either mode). */
+export function isDatabaseInitialized(): boolean {
+  return initializationFinished;
+}
+
+/** True when DATABASE_URL was provided and a pool was created. */
+export function isPostgresConfigured(): boolean {
+  return pool !== null;
+}
+
+// PostgreSQL Connection Pool
+//
+// Only created when DATABASE_URL is configured. Without it the application can
+// still start outside production, but only in the explicit 'memory' mode.
+const databaseUrl = (process.env.DATABASE_URL || '').trim();
+
+// SSL policy:
+//  - `sslmode=...` in the URL is honored by node-postgres itself (not overridden)
+//  - local hosts are treated as plain (non-TLS) PostgreSQL
+//  - any other host keeps the historical permissive TLS setting used for
+//    managed/cloud SQL instances.
+const isLocalDatabase = /(^|\/\/|@)(localhost|127\.0\.0\.1|\[::1\])[:/]/.test(databaseUrl);
+const sslConfig: boolean | { rejectUnauthorized: boolean } | undefined = databaseUrl.includes('sslmode=')
+  ? undefined
+  : isLocalDatabase
+    ? false
+    : { rejectUnauthorized: false };
+
+const pool: pg.Pool | null = databaseUrl
+  ? new pg.Pool({
+      connectionString: databaseUrl,
+      ...(sslConfig !== undefined ? { ssl: sslConfig } : {}),
+      max: 10,
+      idleTimeoutMillis: 30000,
+      // Fail fast instead of hanging startup indefinitely on an unreachable host.
+      connectionTimeoutMillis: 10000,
+    })
+  : null;
+
+if (pool) {
+  pool.on('error', (err) => {
+    console.error('Unexpected error on idle PostgreSQL client:', err);
+  });
+}
 
 export { pool };
 
-// Async helper to execute SQL statements. Propagates failures to the caller to prevent silent database write drops.
+// Async helper to execute SQL statements.
+//
+//  - In 'postgresql' mode the statement must succeed: failures propagate so a
+//    caller never mutates in-memory state for data that was not persisted.
+//  - In 'memory' mode PostgreSQL is intentionally out of the request path, so
+//    the statement is skipped and the in-memory store is the single, explicit
+//    source of truth for this process.
 async function executeSql(query: string, params: any[] = []): Promise<any> {
+  if (databaseMode === 'memory' || !pool) {
+    return null;
+  }
   try {
     return await pool.query(query, params);
   } catch (err) {
@@ -134,51 +204,128 @@ export async function pruneOldPings(): Promise<void> {
 }
 
 /**
- * Initializes schema, seeds PostgreSQL if empty, and hydrates in-memory cache
+ * Initializes the database and hydrates the in-memory read cache.
+ *
+ * Startup contract (called by startServer() BEFORE httpServer.listen()):
+ *
+ *   load environment -> connect -> apply schema/migrations -> seed when empty
+ *   -> hydrate -> report ready
+ *
+ * Failure policy:
+ *  - Production (NODE_ENV=production && DEMO_MODE!=='true'): any failure is
+ *    fatal. The promise rejects and the process exits; the server never listens
+ *    with an unusable database.
+ *  - Database configured but failing (reachable yet schema/seed/hydration
+ *    error): fatal in every environment. This is a real database failure and
+ *    must not be hidden behind a fallback that would make reads succeed while
+ *    writes target a broken database.
+ *  - Development/demo only: when no database is configured, or the configured
+ *    database is unreachable, fall back to the explicit in-memory mode with a
+ *    loud warning (see logMemoryFallback).
+ *
+ * The returned promise is memoized: concurrent/repeat calls await the same run.
  */
-export async function initDatabase(): Promise<void> {
+export function initDatabase(): Promise<void> {
+  if (!initializationPromise) {
+    initializationPromise = runInitialization();
+  }
+  return initializationPromise;
+}
+
+function logMemoryFallback(reason: string): void {
+  console.warn(
+    [
+      '',
+      '***********************************************************************',
+      '* [db] POSTGRES FALLBACK — running in IN-MEMORY development mode',
+      `*   reason: ${reason}`,
+      '*   PostgreSQL is not used at all: reads AND writes are served from',
+      '*   process memory and are LOST when the server restarts.',
+      '*   Set DATABASE_URL (see .env.example) and restart to persist data.',
+      '*   This fallback is disabled when NODE_ENV=production.',
+      '***********************************************************************',
+      '',
+    ].join('\n')
+  );
+}
+
+async function runInitialization(): Promise<void> {
+  const strictProduction = process.env.NODE_ENV === 'production' && process.env.DEMO_MODE !== 'true';
+
+  // --- No database configured -------------------------------------------------
+  if (!pool) {
+    if (strictProduction) {
+      throw new Error('DATABASE_URL is not configured. PostgreSQL is required in production.');
+    }
+    databaseMode = 'memory';
+    seedInitialDataInMemory();
+    initializationFinished = true;
+    logMemoryFallback('DATABASE_URL is not set');
+    return;
+  }
+
+  // --- Database configured: connect, migrate, seed, hydrate -------------------
+  let reachable = false;
   try {
-    // Run safe table migration checks to ensure all canonical columns exist
-    await executeSql(`
-      ALTER TABLE trips ADD COLUMN IF NOT EXISTS scheduled_at BIGINT;
-      ALTER TABLE trips ADD COLUMN IF NOT EXISTS started_at BIGINT;
-      ALTER TABLE trips ADD COLUMN IF NOT EXISTS completed_at BIGINT;
-      ALTER TABLE trips ADD COLUMN IF NOT EXISTS vehicle_id VARCHAR(64);
-      ALTER TABLE trips ADD COLUMN IF NOT EXISTS route_geometry JSONB;
-      ALTER TABLE trips ADD COLUMN IF NOT EXISTS token_revoked BOOLEAN DEFAULT FALSE;
-      ALTER TABLE drivers ADD COLUMN IF NOT EXISTS current_trip_id VARCHAR(64);
-      ALTER TABLE drivers ADD COLUMN IF NOT EXISTS location_sharing_enabled BOOLEAN DEFAULT TRUE;
-      ALTER TABLE drivers ADD COLUMN IF NOT EXISTS speedometer_enabled BOOLEAN DEFAULT TRUE;
-      ALTER TABLE companies ADD COLUMN IF NOT EXISTS join_code VARCHAR(32);
-      ALTER TABLE companies ADD COLUMN IF NOT EXISTS is_public BOOLEAN DEFAULT TRUE;
-      ALTER TABLE companies ADD COLUMN IF NOT EXISTS lead_driver_id VARCHAR(64);
-      ALTER TABLE companies ADD COLUMN IF NOT EXISTS lead_phone VARCHAR(32);
-      UPDATE companies SET join_code = '482913' WHERE id = 'comp-byblos-01' AND (join_code IS NULL OR join_code = '');
-      UPDATE companies SET join_code = '739104' WHERE id = 'comp-lau-dorm' AND (join_code IS NULL OR join_code = '');
-      UPDATE companies SET lead_phone = '+961 70 123 456' WHERE id = 'comp-byblos-01' AND (lead_phone IS NULL OR lead_phone = '');
-      UPDATE companies SET lead_phone = '+961 70 882 144' WHERE id = 'comp-lau-dorm' AND (lead_phone IS NULL OR lead_phone = '');
-    `);
+    await pool.query('SELECT 1;');
+    reachable = true;
+
+    // From here executeSql() writes through to PostgreSQL.
+    databaseMode = 'postgresql';
+
+    const appliedMigrations = await applyMigrations(pool);
+    for (const id of appliedMigrations) {
+      console.log(`[db] applied migration: ${id}`);
+    }
 
     const res = await pool.query('SELECT count(*) FROM companies;');
     const count = parseInt(res.rows[0].count, 10);
 
     if (count === 0) {
-      console.log('PostgreSQL database is empty. Seeding initial Jbeil/LAU dorm shuttle fleet...');
+      console.log('[db] PostgreSQL database is empty. Seeding initial Jbeil/LAU dorm shuttle fleet...');
       await seedInitialDataToPostgres();
     }
 
-    // Hydrate memory cache from PostgreSQL
+    // Hydrate the in-memory read cache from PostgreSQL
     await hydrateFromPostgres();
 
-    // Start 1-hour periodic ping pruning
-    setInterval(pruneOldPings, 60 * 60 * 1000);
-  } catch (err) {
-    console.error('Error during initDatabase:', err);
-    if (process.env.NODE_ENV === 'production' && process.env.DEMO_MODE !== 'true') {
-      throw new Error(`Fatal PostgreSQL initialization error: ${(err as Error).message}`);
+    // 1-hour periodic ping retention job (PostgreSQL mode only)
+    if (!pruneTimer) {
+      pruneTimer = setInterval(pruneOldPings, 60 * 60 * 1000);
+      pruneTimer.unref?.();
     }
-    // Fallback seed in memory so application runs in local offline development/demo mode
+
+    initializationFinished = true;
+    console.log(
+      `[db] PostgreSQL ready (mode=postgresql): ` +
+        `${Object.keys(dbState.companies).length} companies, ` +
+        `${Object.keys(dbState.drivers).length} drivers, ` +
+        `${Object.keys(dbState.trips).length} trips, ` +
+        `${Object.keys(dbState.tripLogs).length} trip logs hydrated`
+    );
+    return;
+  } catch (err) {
+    const message = (err as Error)?.message || String(err);
+
+    if (reachable) {
+      // PostgreSQL answered, but initialization failed (schema/migration/seed/
+      // hydration). This is a REAL database failure: surface it in every
+      // environment instead of hiding it behind the in-memory fallback.
+      // databaseMode stays 'postgresql' so nothing pretends the data was saved.
+      initializationFinished = false;
+      throw new Error(`PostgreSQL is reachable but initialization failed: ${message}`);
+    }
+
+    if (strictProduction) {
+      initializationFinished = false;
+      throw new Error(`PostgreSQL is unreachable: ${message}`);
+    }
+
+    // Development/demo only: the configured database could not be reached.
+    databaseMode = 'memory';
     seedInitialDataInMemory();
+    initializationFinished = true;
+    logMemoryFallback(`cannot connect to PostgreSQL (${message})`);
   }
 }
 
@@ -709,12 +856,49 @@ function seedInitialDataInMemory(): void {
 }
 
 export const db = {
-  async checkHealth(): Promise<{ healthy: boolean; postgres: boolean; error?: string }> {
+  /**
+   * Reports the real persistence state. `mode` distinguishes the authoritative
+   * PostgreSQL mode from the explicit development-only in-memory fallback, so
+   * a non-persistent process is never advertised as a healthy database.
+   */
+  async checkHealth(): Promise<{
+    healthy: boolean;
+    postgres: boolean;
+    mode: DatabaseMode;
+    initialized: boolean;
+    error?: string;
+  }> {
+    if (!initializationFinished) {
+      return {
+        healthy: false,
+        postgres: false,
+        mode: databaseMode,
+        initialized: false,
+        error: 'Database initialization has not completed',
+      };
+    }
+
+    if (databaseMode === 'memory') {
+      // Development fallback: the process is serving traffic, but nothing is
+      // persisted. Reported as healthy-with-warning (never in production).
+      return {
+        healthy: true,
+        postgres: false,
+        mode: 'memory',
+        initialized: true,
+        error: 'In-memory development mode: data is not persisted (DATABASE_URL missing or unreachable)',
+      };
+    }
+
+    if (!pool) {
+      return { healthy: false, postgres: false, mode: 'memory', initialized: false, error: 'DATABASE_URL is not configured' };
+    }
+
     try {
       await pool.query('SELECT 1;');
-      return { healthy: true, postgres: true };
+      return { healthy: true, postgres: true, mode: 'postgresql', initialized: true };
     } catch (err) {
-      return { healthy: false, postgres: false, error: (err as Error).message };
+      return { healthy: false, postgres: false, mode: 'postgresql', initialized: true, error: (err as Error).message };
     }
   },
 
@@ -1559,7 +1743,7 @@ export const db = {
   },
 };
 
-// Initialize on boot
-initDatabase().catch((err) => {
-  console.error('Fatal initialization error:', err);
-});
+// NOTE: initialization is intentionally NOT triggered at module-import time.
+// `server.ts` awaits `initDatabase()` inside `startServer()` before the HTTP
+// server starts listening, and `npm run db:init` runs it as a standalone
+// bootstrap. See initDatabase() for the failure policy.
